@@ -49,7 +49,7 @@ jobs:
           # 2. PyJWKClient fetches the JWKS, picks the key by the token's kid,
           #    and we verify the signature + audience + expiry. No secret shared.
           key = PyJWKClient(cfg["jwks_uri"]).get_signing_key_from_jwt(tok)
-          claims = jwt.decode(tok, key.key, audience="nvcr.io")
+          claims = jwt.decode(tok, key.key, audience="nvcr.io", algorithms=["RS256"])
           print("SIGNATURE VALID ✓")
           print("verified subject:", claims["sub"])
           print("verified repo:   ", claims["repository"])
