@@ -1,0 +1,29 @@
+name: lab4-debug
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint token with aud=sts.amazonaws.com and decode it
+        run: |
+          export T=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          python3 - <<'PY'
+          import base64, json, os
+          tok = os.environ["T"]
+          def b64u(seg):
+              return json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+          p = b64u(tok.split(".")[1])
+          print("iss:", p.get("iss"))
+          print("aud:", p.get("aud"))
+          print("sub:", p.get("sub"))
+          print("repository:", p.get("repository"))
+          print("ref:", p.get("ref"))
+          PY
