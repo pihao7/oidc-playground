@@ -1,0 +1,27 @@
+name: lab4-aws-oidc
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # REQUIRED: mints the OIDC token AWS will exchange
+  contents: read
+
+jobs:
+  aws:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assume AWS role via OIDC federation (zero stored secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::563669631519:role/github-oidc-lab-pihao7
+          aws-region: us-west-2
+
+      - name: Prove who we are
+        run: |
+          echo "--- sts get-caller-identity ---"
+          aws sts get-caller-identity
+
+      - name: Prove real AWS access (S3 listing with federated creds)
+        run: |
+          echo "--- s3 ls ---"
+          aws s3 ls | head -10
