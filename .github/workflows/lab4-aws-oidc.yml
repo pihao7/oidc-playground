@@ -53,3 +53,10 @@ jobs:
           echo "LEAST PRIVILEGE VERIFIED:"
           echo "  allowed:  s3://${BUCKET}/${PREFIX}/*  (put/get/list)"
           echo "  denied:   everything else (other prefixes, other buckets, account-wide listing)"
+
+      - name: Cleanup — delete the dummy file (DeleteObject is in the scoped policy)
+        run: |
+          aws s3 rm "s3://${BUCKET}/${PREFIX}/hello.txt"
+          echo "--- prefix after cleanup ---"
+          aws s3 ls "s3://${BUCKET}/${PREFIX}/" || true
+          echo "(bucket has versioning on, so a delete marker remains — object is gone from listings)"
