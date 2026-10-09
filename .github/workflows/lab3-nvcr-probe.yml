@@ -1,0 +1,26 @@
+name: lab3-nvcr-probe
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try the proposed nvcr.io OIDC token exchange (Req-2b — NOT live yet)
+        run: |
+          NVCR_TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nvcr.io" | jq -r .value)
+          echo "minted GitHub OIDC token: ${NVCR_TOKEN:0:40}..."
+
+          echo "--- attempting token exchange at nvcr.io/oauth2/token ---"
+          curl -sS -w '\nHTTP %{http_code}\n' -X POST "https://nvcr.io/oauth2/token" \
+            -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+            -d "subject_token=$NVCR_TOKEN" \
+            -d "subject_token_type=urn:ietf:params:oauth:token-type:jwt" || true
+
+          echo "--- expected: the endpoint does not exist yet (Req-2b is the proposal) ---"

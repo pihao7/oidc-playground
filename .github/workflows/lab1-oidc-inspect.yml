@@ -1,0 +1,57 @@
+name: lab1-oidc-inspect
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # REQUIRED: this is what makes GitHub mint the OIDC token
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint OIDC token (audience=nvcr.io, mirroring the proposal)
+        run: |
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nvcr.io" | jq -r .value)
+          printf '%s' "$TOKEN" > "$RUNNER_TEMP/oidc.jwt"
+          echo "token length: ${#TOKEN} chars"
+          echo "stored at \$RUNNER_TEMP/oidc.jwt"
+
+      - name: Decode header + payload claims
+        run: |
+          python3 - <<'PY'
+          import base64, json, os
+          tok = open(os.path.join(os.environ["RUNNER_TEMP"], "oidc.jwt")).read().strip()
+          def b64u(seg):
+              return json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+          print("=== JOSE HEADER ===")
+          print(json.dumps(b64u(tok.split(".")[0]), indent=2))
+          print("=== PAYLOAD (the claims) ===")
+          print(json.dumps(b64u(tok.split(".")[1]), indent=2))
+          PY
+
+      - name: Verify signature offline against GitHub's JWKS
+        run: |
+          pip install -q "pyjwt[crypto]" 2>/dev/null
+          python3 - <<'PY'
+          import json, os, urllib.request, jwt
+          from jwt import PyJWKClient
+          tok = open(os.path.join(os.environ["RUNNER_TEMP"], "oidc.jwt")).read().strip()
+
+          # 1. GitHub publishes its OIDC configuration + public keys (JWKS)
+          cfg = json.load(urllib.request.urlopen(
+              "https://token.actions.githubusercontent.com/.well-known/openid-configuration"))
+          print("issuer:", cfg["issuer"])
+          print("jwks_uri:", cfg["jwks_uri"])
+
+          # 2. PyJWKClient fetches the JWKS, picks the key by the token's kid,
+          #    and we verify the signature + audience + expiry. No secret shared.
+          key = PyJWKClient(cfg["jwks_uri"]).get_signing_key_from_jwt(tok)
+          claims = jwt.decode(tok, key.key, audience="nvcr.io")
+          print("SIGNATURE VALID ✓")
+          print("verified subject:", claims["sub"])
+          print("verified repo:   ", claims["repository"])
+          print("verified ref:    ", claims["ref"])
+          PY

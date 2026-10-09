@@ -1,0 +1,45 @@
+name: lab2-keyless-sign-ghcr
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write    # keyless signing (Flow A)
+  contents: read
+  packages: write    # push to ghcr.io
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Build & push a throwaway image (GITHUB_TOKEN is automatic — no secrets)
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/oidc-playground:lab2"
+          mkdir -p ctx && printf 'FROM alpine:3.20\nCMD ["true"]\n' > ctx/Dockerfile
+          docker build -q -t "$IMAGE" ctx
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push -q "$IMAGE"
+
+      - name: Resolve digest (always sign by digest, never by tag)
+        run: |
+          curl -sSL "https://github.com/google/go-containerregistry/releases/latest/download/crane_linux_x86_64.tar.gz" \
+            | tar -xz crane
+          DIGEST="$(./crane digest "ghcr.io/${{ github.repository_owner }}/oidc-playground:lab2")"
+          echo "REF=ghcr.io/${{ github.repository_owner }}/oidc-playground@$DIGEST" >> "$GITHUB_ENV"
+
+      - name: Keyless sign (Flow A — ambient OIDC token -> Fulcio -> Rekor -> referrer)
+        run: cosign sign --yes "$REF"
+
+      - name: Keyless verify (identity must match THIS repo's workflow)
+        run: |
+          cosign verify "$REF" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Show the Referrers API working (the thing nvcr.io lacks)
+        run: |
+          DIGEST="${REF##*@}"
+          curl -sS -H "Accept: application/vnd.oci.image.index.v1+json" \
+            "https://ghcr.io/v2/${{ github.repository_owner }}/oidc-playground/referrers/$DIGEST" \
+            | head -c 600
