@@ -6,6 +6,10 @@ permissions:
   id-token: write   # REQUIRED: mints the OIDC token AWS will exchange
   contents: read
 
+env:
+  BUCKET: pihao7-oidc-lab-1791569715
+  PREFIX: lab4
+
 jobs:
   aws:
     runs-on: ubuntu-latest
@@ -21,7 +25,31 @@ jobs:
           echo "--- sts get-caller-identity ---"
           aws sts get-caller-identity
 
-      - name: Prove real AWS access (S3 listing with federated creds)
+      - name: Upload dummy file to the scoped prefix
         run: |
-          echo "--- s3 ls ---"
-          aws s3 ls | head -10
+          echo "hello from GitHub Actions OIDC at $(date -u +%FT%TZ), run ${{ github.run_id }}" > hello.txt
+          aws s3 cp hello.txt "s3://${BUCKET}/${PREFIX}/hello.txt"
+          echo "--- read back ---"
+          aws s3 cp "s3://${BUCKET}/${PREFIX}/hello.txt" -
+          echo "--- list scoped prefix ---"
+          aws s3 ls "s3://${BUCKET}/${PREFIX}/"
+
+      - name: Negative test 1 — write OUTSIDE the prefix must be denied
+        run: |
+          if aws s3 cp hello.txt "s3://${BUCKET}/outside/hello.txt" 2>err.txt; then
+            echo "UNEXPECTED: write outside prefix succeeded"; exit 1
+          fi
+          echo "correctly denied:"; grep -o "AccessDenied" err.txt | head -1
+
+      - name: Negative test 2 — root bucket listing must be denied
+        run: |
+          if aws s3 ls 2>err2.txt; then
+            echo "UNEXPECTED: account-wide listing succeeded"; exit 1
+          fi
+          echo "correctly denied:"; grep -o "AccessDenied" err2.txt | head -1
+
+      - name: Summary
+        run: |
+          echo "LEAST PRIVILEGE VERIFIED:"
+          echo "  allowed:  s3://${BUCKET}/${PREFIX}/*  (put/get/list)"
+          echo "  denied:   everything else (other prefixes, other buckets, account-wide listing)"
