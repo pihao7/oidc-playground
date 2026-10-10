@@ -31,8 +31,30 @@ from jwt import PyJWKClient
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
 CONFIG = Path(__file__).parent / "exchange_config.json"
+AUDIT_LOG = Path(__file__).parent / "exchange_audit.log"
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 CREDENTIAL_ISSUER = "https://nvcr-exchange-poc.local"
+
+# --- audit logging: every exchange outcome, file-backed, timestamps, no raw tokens ---
+import logging  # noqa: E402
+
+AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.FileHandler(AUDIT_LOG), logging.StreamHandler(sys.stdout)],
+)
+audit = logging.getLogger("exchange-audit")
+
+
+def audit_exchange(outcome: str, *, conn_id: str = "-", rev: int = -1, principal: str = "-",
+                   subject: str = "-", policies: list | None = None, ttl: int = -1,
+                   error: str = "-", audience: str = "-", token_type: str = "-"):
+    """SDD section 5 'fail closed and audit': connection/revision/principal/policies/outcome.
+    Never logs token material — only the verified subject claim and metadata."""
+    audit.info("[audit] outcome=%s conn=%s rev=%s principal=%s subject=%s policies=%s "
+               "ttl=%ss audience=%s subject_token_type=%s error=%s",
+               outcome, conn_id, rev, principal, subject, policies, ttl, audience, token_type, error)
 
 # --- access-token signing key (fresh per process; served via JWKS) ---
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
@@ -95,17 +117,28 @@ class Handler(BaseHTTPRequestHandler):
             self._exchange(params)
         except ExchangeError as e:
             self._json(e.status, {"error": e.code, "error_description": e.desc})
-        except Exception as e:  # never leak internals; fail closed
+        except Exception:  # never leak internals; fail closed
+            audit_exchange("DENIED", error="malformed request")
             self._json(400, {"error": "invalid_request", "error_description": "malformed request"})
+
+    def log_message(self, fmt, *args):  # route HTTP access lines into the audit log
+        audit.info("http %s", fmt % args)
 
     def _exchange(self, p: dict):
         if p.get("grant_type") != "urn:ietf:params:oauth:grant-type:token-exchange":
+            audit_exchange("DENIED", error="unsupported_grant_type",
+                           audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
             raise ExchangeError(400, "unsupported_grant_type", "unsupported grant")
         subject_token = p.get("subject_token", "")
         conn = CONNECTIONS.get(p.get("connection_id", ""))
         if not conn or not conn.get("enabled"):
+            audit_exchange("DENIED", conn_id=p.get("connection_id", "-"), error="unknown or disabled connection",
+                           audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
             raise ExchangeError(400, "invalid_request", "unknown or disabled connection")
         if p.get("subject_token_type") != "urn:ietf:params:oauth:token-type:id_token":
+            audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                           error="unsupported subject_token_type",
+                           audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
             raise ExchangeError(400, "invalid_request", "unsupported subject_token_type")
 
         # 3. validate the external JWT — signature via GitHub JWKS, issuer, audience, expiry
@@ -119,8 +152,14 @@ class Handler(BaseHTTPRequestHandler):
                 leeway=5,
             )
         except jwt.InvalidAudienceError:
+            audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                           error="invalid_target (audience not accepted)",
+                           audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
             raise ExchangeError(400, "invalid_target", "audience not accepted by this connection")
         except jwt.PyJWTError as e:
+            audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                           error=f"subject token rejected: {type(e).__name__}",
+                           audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
             raise ExchangeError(400, "invalid_request", f"subject token rejected: {type(e).__name__}")
 
         # 4. trust policy selection — named policy or all enabled matching policies
@@ -129,12 +168,21 @@ class Handler(BaseHTTPRequestHandler):
         if selector:
             selected = [q for q in policies if q["id"] == selector and q.get("enabled")]
             if not selected:
+                audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                               principal=conn["principal"]["id"], subject=claims.get("sub", "-"),
+                               error=f"invalid/foreign/disabled trust_policy_id={selector}")
                 raise ExchangeError(400, "invalid_request", "invalid/foreign/disabled trust_policy_id")
             if not match_policy(selected[0], claims):
+                audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                               principal=conn["principal"]["id"], subject=claims.get("sub", "-"),
+                               policies=[selector], error="no matching policy (claims did not match)")
                 raise ExchangeError(400, "invalid_request", "no matching policy")
         else:
             selected = [q for q in policies if q.get("enabled") and match_policy(q, claims)]
             if not selected:
+                audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                               principal=conn["principal"]["id"], subject=claims.get("sub", "-"),
+                               error="no matching policy")
                 raise ExchangeError(400, "invalid_request", "no matching policy")
 
         # 5. sign the login credential — TTL coupled to the subject token (SDD section 3)
@@ -160,9 +208,10 @@ class Handler(BaseHTTPRequestHandler):
             },
         }
         access_token = jwt.encode(cred_claims, SIGNING_KEY, algorithm="RS256", headers={"kid": KID})
-        print(f"[audit] exchange OK conn={conn['connection_id']} rev={conn['revision']} "
-              f"subject={claims.get('sub')} policies={[q['id'] for q in selected]} "
-              f"ttl={exp - now}s", flush=True)
+        audit_exchange("OK", conn_id=conn["connection_id"], rev=conn["revision"],
+                       principal=conn["principal"]["id"], subject=claims.get("sub", "-"),
+                       policies=[q["id"] for q in selected], ttl=exp - now,
+                       audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
         self._json(200, {
             "access_token": access_token,
             "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
