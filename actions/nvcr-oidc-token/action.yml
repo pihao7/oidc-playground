@@ -128,14 +128,16 @@ runs:
         fi
         echo "${ENV_VAR_NAME} is set (${#access_token} chars, masked in logs)"
         # If the credential is a JWT, show its claims (payload only) as POC evidence
-        payload="$(printf '%s' "$access_token" | python3 -c '
-import sys, base64, json
-try:
-    seg = sys.stdin.read().strip().split(".")[1]
-    seg += "=" * (-len(seg) % 4)
-    print(json.dumps(json.loads(base64.urlsafe_b64decode(seg)), indent=2))
-except Exception:
-    pass' 2>/dev/null || true)"
+        payload="$(ACCESS_TOKEN="$access_token" python3 - <<'PY'
+        import os, base64, json
+        try:
+            seg = os.environ["ACCESS_TOKEN"].split(".")[1]
+            seg += "=" * (-len(seg) % 4)
+            print(json.dumps(json.loads(base64.urlsafe_b64decode(seg)), indent=2))
+        except Exception:
+            pass
+        PY
+        )"
         if [ -n "$payload" ] && printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
           echo "--- access token claims (payload only) ---"
           printf '%s' "$payload" | jq .
