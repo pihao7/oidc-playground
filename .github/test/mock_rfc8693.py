@@ -56,8 +56,16 @@ class Handler(BaseHTTPRequestHandler):
             "trust_policy_id": "policy-main",
         }
         wrong = {k: params.get(k) for k, v in expected.items() if params.get(k) != v}
-        assert not wrong, f"missing/wrong params: {wrong}; got: {sorted(params)}"
-        assert len(params.get("subject_token", "")) > 20, "subject_token missing"
+        if wrong or len(params.get("subject_token", "")) <= 20:
+            payload = json.dumps({
+                "error": "invalid_request",
+                "error_description": f"missing/wrong params: {wrong or 'subject_token too short'}",
+            }).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
 
         jwt = ".".join([
             b64u({"alg": "RS256", "typ": "JWT"}),
