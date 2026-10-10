@@ -1,0 +1,145 @@
+name: 'NVCR OIDC Token Exchange'
+description: >
+  Mints a GitHub OIDC ID token (audience-configurable) and exchanges it at the
+  NGC registry token-exchange endpoint for a short-lived registry access token,
+  per the "NGC Registry: OIDC Federation" SDD (RFC 8693 token exchange).
+  Writes the access token to $GITHUB_ENV for subsequent steps and to step outputs.
+author: 'pihao7'
+
+inputs:
+  exchange-url:
+    description: 'Token exchange endpoint (SDD §3: POST /oauth/token)'
+    required: false
+    default: 'https://nvcr.io/oauth/token'
+  org-id:
+    description: 'NGC org identifier (from the onboarding handoff)'
+    required: true
+  connection-id:
+    description: 'OIDC connection id (from the onboarding handoff)'
+    required: true
+  trust-policy-id:
+    description: 'Optional trust policy selector — least privilege; omit to select all matching policies'
+    required: false
+    default: ''
+  audience:
+    description: 'Audience minted into the ID token — must be listed in the connection subject_audiences'
+    required: false
+    default: 'nvcr.io'
+  subject-token-type:
+    description: 'subject_token_type form parameter (SDD §3)'
+    required: false
+    default: 'urn:ietf:params:oauth:token-type:id_token'
+  env-var-name:
+    description: 'Name of the environment variable written to $GITHUB_ENV'
+    required: false
+    default: 'NVCR_ACCESS_TOKEN'
+
+outputs:
+  token:
+    description: 'Short-lived registry access token'
+    value: ${{ steps.exchange.outputs.token }}
+  expires-in:
+    description: 'Lifetime in seconds as returned by the exchange'
+    value: ${{ steps.exchange.outputs.expires_in }}
+
+runs:
+  using: composite
+  steps:
+    - id: mint
+      name: Mint GitHub OIDC ID token
+      shell: bash
+      env:
+        AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::error::ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN are empty"
+          echo "::error::The job needs 'permissions: id-token: write' to mint OIDC tokens"
+          exit 1
+        fi
+        resp=$(curl -sS \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}") \
+          || { echo "::error::OIDC token request failed"; exit 1; }
+        token=$(printf '%s' "$resp" | jq -er '.value') \
+          || { echo "::error::mint response had no .value: $resp"; exit 1; }
+        echo "::add-mask::${token}"
+        printf '%s' "$token" > "$RUNNER_TEMP/nvcr-oidc-id-token.jwt"
+        echo "minted ID token: ${#token} chars, aud=${AUDIENCE}"
+
+    - id: exchange
+      name: Exchange ID token for registry access token
+      shell: bash
+      env:
+        EXCHANGE_URL: ${{ inputs.exchange-url }}
+        ORG_ID: ${{ inputs.org-id }}
+        CONNECTION_ID: ${{ inputs.connection-id }}
+        TRUST_POLICY_ID: ${{ inputs.trust-policy-id }}
+        AUDIENCE: ${{ inputs.audience }}
+        SUBJECT_TOKEN_TYPE: ${{ inputs.subject-token-type }}
+        ENV_VAR_NAME: ${{ inputs.env-var-name }}
+      run: |
+        set -euo pipefail
+        if ! [[ "$ENV_VAR_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          echo "::error::env-var-name '$ENV_VAR_NAME' is not a valid environment variable name"
+          exit 1
+        fi
+        id_token="$(cat "$RUNNER_TEMP/nvcr-oidc-id-token.jwt")"
+        args=(
+          -sS -w '\n%{http_code}'
+          -X POST "$EXCHANGE_URL"
+          --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange"
+          --data-urlencode "subject_token=${id_token}"
+          --data-urlencode "subject_token_type=${SUBJECT_TOKEN_TYPE}"
+          --data-urlencode "org_id=${ORG_ID}"
+          --data-urlencode "connection_id=${CONNECTION_ID}"
+          --data-urlencode "audience=${AUDIENCE}"
+        )
+        if [ -n "$TRUST_POLICY_ID" ]; then
+          args+=(--data-urlencode "trust_policy_id=${TRUST_POLICY_ID}")
+        fi
+        resp=$(curl "${args[@]}") || { echo "::error::exchange request failed"; exit 1; }
+        code="$(printf '%s' "$resp" | tail -n1)"
+        body="$(printf '%s' "$resp" | sed '$d')"
+        if [ "$code" != "200" ]; then
+          echo "::error::exchange returned HTTP ${code}: ${body}"
+          exit 1
+        fi
+        access_token="$(printf '%s' "$body" | jq -er '.access_token')" \
+          || { echo "::error::exchange response had no access_token: ${body}"; exit 1; }
+        expires_in="$(printf '%s' "$body" | jq -r '.expires_in // ""')"
+        echo "::add-mask::${access_token}"
+        echo "token=${access_token}" >> "$GITHUB_OUTPUT"
+        echo "expires_in=${expires_in}" >> "$GITHUB_OUTPUT"
+        echo "${ENV_VAR_NAME}=${access_token}" >> "$GITHUB_ENV"
+        echo "exchange OK: HTTP ${code}, expires_in=${expires_in}s"
+
+    - id: verify
+      name: Verify token plumbing (claims only — never prints the token)
+      shell: bash
+      env:
+        ENV_VAR_NAME: ${{ inputs.env-var-name }}
+      run: |
+        set -euo pipefail
+        access_token="${!ENV_VAR_NAME:-}"
+        if [ -z "$access_token" ]; then
+          echo "::error::${ENV_VAR_NAME} is empty in the environment"
+          exit 1
+        fi
+        echo "${ENV_VAR_NAME} is set (${#access_token} chars, masked in logs)"
+        # If the credential is a JWT, show its claims (payload only) as POC evidence
+        payload="$(printf '%s' "$access_token" | python3 -c '
+import sys, base64, json
+try:
+    seg = sys.stdin.read().strip().split(".")[1]
+    seg += "=" * (-len(seg) % 4)
+    print(json.dumps(json.loads(base64.urlsafe_b64decode(seg)), indent=2))
+except Exception:
+    pass' 2>/dev/null || true)"
+        if [ -n "$payload" ] && printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
+          echo "--- access token claims (payload only) ---"
+          printf '%s' "$payload" | jq .
+          printf '%s' "$payload" | jq . >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
+        else
+          echo "access token is opaque (not a JWT) — skipping claim decode"
+        fi

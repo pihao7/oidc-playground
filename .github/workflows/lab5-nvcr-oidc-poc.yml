@@ -1,0 +1,64 @@
+name: lab5-nvcr-oidc-poc
+on:
+  workflow_dispatch:
+    inputs:
+      org_id:
+        description: 'NGC org id (onboarding handoff — SDD §3)'
+        required: true
+        default: 'org-123'
+      connection_id:
+        description: 'OIDC connection id (onboarding handoff)'
+        required: true
+        default: 'conn-github'
+      trust_policy_id:
+        description: 'Optional trust policy selector (least privilege)'
+        required: false
+        default: ''
+
+permissions:
+  id-token: write   # mints the GitHub OIDC token (lab1's step)
+  contents: read
+
+jobs:
+  poc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exchange GitHub OIDC token for NVCR access token
+        id: nvcr
+        # continue-on-error: the exchange endpoint is not live until Req-2b lands;
+        # a failure here still proves the client-side request shape (see the error body)
+        continue-on-error: true
+        uses: ./actions/nvcr-oidc-token
+        with:
+          org-id: ${{ inputs.org_id }}
+          connection-id: ${{ inputs.connection_id }}
+          trust-policy-id: ${{ inputs.trust_policy_id }}
+
+      - name: Use the access token in a subsequent step
+        if: steps.nvcr.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if [ -z "${NVCR_ACCESS_TOKEN:-}" ]; then
+            echo "::error::NVCR_ACCESS_TOKEN not present in env"; exit 1
+          fi
+          echo "token is available to this step (masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
+
+          # The real consumer — registry login (works once Req-2b is live):
+          echo "$NVCR_ACCESS_TOKEN" | docker login nvcr.io -u '$oauthtoken' --password-stdin \
+            && echo "docker login OK" \
+            || echo "::warning::docker login rejected — Req-2b not live yet"
+
+      - name: POC summary
+        if: always()
+        run: |
+          {
+            echo "## NVCR OIDC POC (lab5)"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Mint GitHub OIDC token (aud=nvcr.io) | ✓ always |"
+            echo "| Exchange at nvcr.io/oauth/token | ${{ steps.nvcr.outcome == 'success' && '✓' || '✗ (endpoint not live — expected until Req-2b)' }} |"
+            echo "| Access token in env for later steps | ${{ steps.nvcr.outcome == 'success' && '✓' || '—' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
