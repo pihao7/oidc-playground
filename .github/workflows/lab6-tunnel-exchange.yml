@@ -1,0 +1,68 @@
+name: lab6-tunnel-exchange
+on:
+  workflow_dispatch:
+    inputs:
+      exchange_url:
+        description: 'Public exchange endpoint base (cloudflare tunnel, no trailing slash)'
+        required: true
+      org_id:
+        description: 'NGC org id'
+        required: true
+        default: 'org-123'
+      connection_id:
+        description: 'OIDC connection id'
+        required: true
+        default: 'conn-github'
+      trust_policy_id:
+        description: 'Trust policy selector'
+        required: true
+        default: 'policy-main'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint + exchange via the tunnel endpoint
+        id: nvcr
+        uses: ./actions/nvcr-oidc-token
+        with:
+          exchange-url: ${{ inputs.exchange_url }}/oauth/token
+          org-id: ${{ inputs.org_id }}
+          connection-id: ${{ inputs.connection_id }}
+          trust-policy-id: ${{ inputs.trust_policy_id }}
+
+      - name: Validate the returned credential (signature via server JWKS + claims)
+        run: |
+          pip install -q "pyjwt[crypto]" 2>/dev/null
+          python3 - <<'PY'
+          import json, os, time
+          import jwt
+          from jwt import PyJWKClient
+          tok = os.environ["NVCR_ACCESS_TOKEN"]
+          base = os.environ["EXCHANGE_BASE"]
+          jwks = PyJWKClient(base + "/.well-known/jwks.json")
+          claims = jwt.decode(
+              tok,
+              jwks.get_signing_key_from_jwt(tok).key,
+              algorithms=["RS256"],
+              audience="nvcr.io",
+              issuer="https://nvcr-exchange-poc.local",
+          )
+          assert claims["exp"] > time.time(), "credential expired"
+          print("CREDENTIAL SIGNATURE VALID (verified against the exchange server's JWKS)")
+          print(json.dumps(claims, indent=2))
+          PY
+        env:
+          EXCHANGE_BASE: ${{ inputs.exchange_url }}
+
+      - name: Subsequent-step consumption
+        run: |
+          test -n "${NVCR_ACCESS_TOKEN:-}" || { echo "::error::NVCR_ACCESS_TOKEN missing in env"; exit 1; }
+          echo "OK: token present in a later step (${#NVCR_ACCESS_TOKEN} chars, masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
+          echo "LAB6 E2E PASSED — mint → tunnel exchange → credential validated → env consumption" >> "$GITHUB_STEP_SUMMARY"

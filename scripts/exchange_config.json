@@ -1,0 +1,31 @@
+{
+  "connections": [
+    {
+      "connection_id": "conn-github",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject_audiences": ["nvcr.io"],
+      "principal": {"type": "CLOUD_ACCOUNT", "id": "nca:org-123-service-principal"},
+      "max_token_ttl_seconds": 600,
+      "enabled": true,
+      "revision": 7,
+      "trust_policies": [
+        {
+          "id": "policy-main",
+          "enabled": true,
+          "subject_claims": {
+            "equals": {"sub": "repo:pihao7@146127243/oidc-playground@1412214354:ref:refs/heads/main"}
+          },
+          "grants": {"org-123/team-a/image": {"pull": true, "push": true}}
+        },
+        {
+          "id": "policy-any-branch",
+          "enabled": true,
+          "subject_claims": {
+            "one_of": {"ref": ["refs/heads/main", "refs/heads/release/*"]}
+          },
+          "grants": {"org-123/team-a/image": {"pull": true}}
+        }
+      ]
+    }
+  ]
+}
