@@ -145,6 +145,14 @@ class Handler(BaseHTTPRequestHandler):
                            audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
             raise ExchangeError(400, "invalid_request", "unsupported subject_token_type")
 
+        # 2.5 the request's audience must be one the CONNECTION accepts (SDD: input-token
+        # validation is against connection configuration — the caller cannot widen it)
+        if p.get("audience") not in conn.get("subject_audiences", []):
+            audit_exchange("DENIED", conn_id=conn["connection_id"], rev=conn["revision"],
+                           error=f"invalid_target (audience {p.get('audience')} not in connection subject_audiences)",
+                           audience=p.get("audience", "-"), token_type=p.get("subject_token_type", "-"))
+            raise ExchangeError(400, "invalid_target", "audience not accepted by this connection")
+
         # 3. validate the external JWT — signature via GitHub JWKS, issuer, audience, expiry
         try:
             claims = jwt.decode(
