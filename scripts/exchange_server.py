@@ -47,14 +47,18 @@ logging.basicConfig(
 audit = logging.getLogger("exchange-audit")
 
 
+OUTCOME_EMOJI = {"OK": "✅", "DENIED": "❌"}
+
+
 def audit_exchange(outcome: str, *, conn_id: str = "-", rev: int = -1, principal: str = "-",
                    subject: str = "-", policies: list | None = None, ttl: int = -1,
                    error: str = "-", audience: str = "-", token_type: str = "-"):
     """SDD section 5 'fail closed and audit': connection/revision/principal/policies/outcome.
     Never logs token material — only the verified subject claim and metadata."""
-    audit.info("[audit] outcome=%s conn=%s rev=%s principal=%s subject=%s policies=%s "
+    audit.info("%s [audit] outcome=%s conn=%s rev=%s principal=%s subject=%s policies=%s "
                "ttl=%ss audience=%s subject_token_type=%s error=%s",
-               outcome, conn_id, rev, principal, subject, policies, ttl, audience, token_type, error)
+               OUTCOME_EMOJI.get(outcome, "⚠️"), outcome, conn_id, rev, principal, subject,
+               policies, ttl, audience, token_type, error)
 
 # --- access-token signing key (fresh per process; served via JWKS) ---
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
