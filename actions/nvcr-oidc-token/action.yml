@@ -38,7 +38,7 @@ outputs:
   token:
     description: 'Short-lived registry access token'
     value: ${{ steps.exchange.outputs.token }}
-  expires-in:
+  expires_in:
     description: 'Lifetime in seconds as returned by the exchange'
     value: ${{ steps.exchange.outputs.expires_in }}
 
