@@ -1,0 +1,64 @@
+name: lab5-selftest
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  positive:
+    name: exchange 200 → env var → subsequent step
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start mock RFC 8693 server (asserts the SDD request shape)
+        run: |
+          python3 .github/test/mock_rfc8693.py 18765 ok &
+          sleep 1
+          curl -sS -o /dev/null -w 'mock healthz: HTTP %{http_code}\n' http://127.0.0.1:18765/healthz
+
+      - name: Run the action against the mock
+        id: nvcr
+        uses: ./actions/nvcr-oidc-token
+        with:
+          exchange-url: http://127.0.0.1:18765/oauth/token
+          org-id: org-123
+          connection-id: conn-github
+          trust-policy-id: policy-main
+
+      - name: Assert the token reached this subsequent step
+        run: |
+          test -n "${NVCR_ACCESS_TOKEN:-}" || { echo "::error::NVCR_ACCESS_TOKEN missing in env"; exit 1; }
+          echo "OK: NVCR_ACCESS_TOKEN present (${#NVCR_ACCESS_TOKEN} chars, masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
+          echo "POSITIVE SELFTEST PASSED" >> "$GITHUB_STEP_SUMMARY"
+
+  negative:
+    name: exchange 400 → action fails with error body
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start mock that rejects the exchange
+        run: |
+          python3 .github/test/mock_rfc8693.py 18766 reject &
+          sleep 1
+          curl -sS -o /dev/null -w 'mock healthz: HTTP %{http_code}\n' http://127.0.0.1:18766/healthz
+
+      - name: Run the action (expected to fail)
+        id: nvcr
+        continue-on-error: true
+        uses: ./actions/nvcr-oidc-token
+        with:
+          exchange-url: http://127.0.0.1:18766/oauth/token
+          org-id: org-123
+          connection-id: conn-github
+
+      - name: Assert the failure surfaced correctly
+        if: always()
+        run: |
+          test "${{ steps.nvcr.outcome }}" = "failure" \
+            || { echo "::error::expected the action to fail on HTTP 400"; exit 1; }
+          echo "OK: action failed as expected on the 400 mock (error body surfaced in the exchange step)"
+          echo "NEGATIVE SELFTEST PASSED" >> "$GITHUB_STEP_SUMMARY"
