@@ -82,8 +82,9 @@ jobs:
           NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
         run: |
           set -euo pipefail
-          # The docker DAEMON spawns the credential helper, so the exchanged
-          # credential must live in the daemon's environment (systemd drop-in).
+          # The docker CLI resolves pull/push credentials itself (it spawns the
+          # helper), but older/other paths resolve daemon-side — cover both by also
+          # placing the credential in the daemon's environment (systemd drop-in).
           sudo mkdir -p /etc/systemd/system/docker.service.d
           printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=%s\n' "$NGC_OIDC_ACCESS_TOKEN" \
             | sudo tee /etc/systemd/system/docker.service.d/lab7.conf >/dev/null
@@ -92,7 +93,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tls"
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
             -keyout "$RUNNER_TEMP/tls/ca.key" -out "$RUNNER_TEMP/tls/ca.crt" -subj "/CN=lab7-sim-ca"
-          openssl req -newkey rsa:2048 -nodes -days 2 \
+          openssl req -newkey rsa:2048 -nodes \
             -keyout "$RUNNER_TEMP/tls/nvcr.io.key" -out "$RUNNER_TEMP/tls/nvcr.io.csr" \
             -subj "/CN=nvcr.io" -addext "subjectAltName=DNS:nvcr.io"
           openssl x509 -req -days 2 \
@@ -102,10 +103,14 @@ jobs:
           sudo update-ca-certificates
           sudo systemctl daemon-reload
           sudo systemctl restart docker
+          # diagnostics: did the credential reach the daemon's environment? (count only)
+          echo "daemon env has NGC_OIDC_ACCESS_TOKEN: $(sudo cat /proc/$(systemctl show docker --property=ExecMainPID --value)/environ 2>/dev/null | tr '\0' '\n' | grep -c '^NGC_OIDC_ACCESS_TOKEN=' || true)"
 
       - name: Honest probe — real nvcr.io with the exchanged credential (expect 401)
         continue-on-error: true
         id: real_probe
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
         run: |
           set -euo pipefail
           if docker pull nvcr.io/nvidia/pytorch:24.10-py3 > "$RUNNER_TEMP/real-probe.log" 2>&1; then
@@ -169,34 +174,51 @@ jobs:
           curl -sSi https://nvcr.io/v2/ | grep -i www-authenticate
 
       - name: Push through the helper (exercises the push grant)
+        id: push
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
         run: |
           set -euo pipefail
           docker pull -q alpine:3.20 >/dev/null
           docker tag alpine:3.20 "$SIM_IMAGE"
           docker push "$SIM_IMAGE"
+          echo "outcome=ok" >> "$GITHUB_OUTPUT"
           echo "pushed $SIM_IMAGE via docker-credential-ngc (exchanged credential)"
 
       - name: Pull — the headline (fresh manifest fetch through the full chain)
+        id: pull
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
         run: |
           set -euo pipefail
           docker rmi "$SIM_IMAGE" >/dev/null
           docker pull "$SIM_IMAGE"
+          echo "outcome=ok" >> "$GITHUB_OUTPUT"
           echo "PULL OK — exchanged credential -> helper -> token service -> registry" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Negative probe — repository outside the trust policy grants (must fail)
+        id: foreign_probe
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
         run: |
           set -euo pipefail
           if docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
+            echo "outcome=BREACHED" >> "$GITHUB_OUTPUT"
             echo "::error::FENCE FAILED: pull of ungranted repository succeeded"
             exit 1
           fi
+          echo "outcome=held" >> "$GITHUB_OUTPUT"
           echo "denied as expected (no grant for org-123/team-b/other):"
           tail -1 "$RUNNER_TEMP/foreign-probe.log"
 
-      - name: Negative probe — garbage credential (must fail; daemon env swapped)
+      - name: Negative probe — garbage credential (must fail; both env paths swapped)
+        id: garbage_probe
+        env:
+          NGC_OIDC_ACCESS_TOKEN: garbage.token
         run: |
           set -euo pipefail
+          # swap the daemon-side copy too, so the probe holds whichever side resolves
           printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=garbage.token\n' \
             | sudo tee /etc/systemd/system/docker.service.d/lab7.conf >/dev/null
           sudo systemctl daemon-reload && sudo systemctl restart docker
@@ -206,9 +228,11 @@ jobs:
             sleep 1
           done
           if docker pull "$SIM_IMAGE" > "$RUNNER_TEMP/garbage-probe.log" 2>&1; then
+            echo "outcome=BREACHED" >> "$GITHUB_OUTPUT"
             echo "::error::FENCE FAILED: pull with garbage credential succeeded"
             exit 1
           fi
+          echo "outcome=held" >> "$GITHUB_OUTPUT"
           echo "denied as expected (garbage credential rejected at the token service):"
           tail -1 "$RUNNER_TEMP/garbage-probe.log"
 
@@ -223,15 +247,15 @@ jobs:
             echo "|---|---|"
             echo "| Exchange | expires_in=${{ steps.nvcr.outputs.expires_in }}s |"
             echo "| Helper protocol | \$oauthtoken + exchanged credential served |"
-            echo "| Real nvcr.io probe | ${{ steps.real_probe.outputs.outcome || 'skipped' }} (denied expected until Req-2b) |"
-            echo "| Push via helper | OK |"
-            echo "| Pull via helper | OK |"
-            echo "| Ungranted repo | denied (fence held) |"
-            echo "| Garbage credential | denied (fence held) |"
+            echo "| Real nvcr.io probe | ${{ steps.real_probe.outputs.outcome || 'not reached' }} (denied expected until Req-2b) |"
+            echo "| Push via helper | ${{ steps.push.outputs.outcome || 'not reached' }} |"
+            echo "| Pull via helper | ${{ steps.pull.outputs.outcome || 'not reached' }} |"
+            echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} |"
+            echo "| Garbage credential | ${{ steps.garbage_probe.outputs.outcome || 'not reached' }} |"
             echo ""
             echo "### Token service audit (runner side; no token material)"
             echo '```'
-            grep '\[token-svc\]' "$RUNNER_TEMP/token-audit.log" | tail -12 || true
+            grep '\[token-svc\]' "$RUNNER_TEMP/token-audit.log" 2>/dev/null | tail -12 || true
             echo '```'
             echo ""
             echo "Exchange-server audit lives on the laptop: scripts/exchange_audit.log"
