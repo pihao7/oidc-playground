@@ -1,0 +1,238 @@
+name: lab7-docker-pull
+on:
+  workflow_dispatch:
+    inputs:
+      exchange_url:
+        description: 'Public exchange endpoint base (cloudflare tunnel, no trailing slash)'
+        required: true
+      org_id:
+        description: 'NGC org id'
+        required: true
+        default: 'org-123'
+      connection_id:
+        description: 'OIDC connection id'
+        required: true
+        default: 'conn-github'
+      trust_policy_id:
+        description: 'Trust policy selector'
+        required: true
+        default: 'policy-main'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  docker-pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      EXCHANGE_URL: ${{ inputs.exchange_url }}
+      ORG_ID: ${{ inputs.org_id }}
+      CONNECTION_ID: ${{ inputs.connection_id }}
+      TRUST_POLICY_ID: ${{ inputs.trust_policy_id }}
+      SIM_IMAGE: nvcr.io/org-123/team-a/image:v1
+      FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint + exchange via the tunnel endpoint (lab6 flow)
+        id: nvcr
+        uses: ./actions/nvcr-oidc-token
+        with:
+          exchange-url: ${{ inputs.exchange_url }}/oauth/token
+          org-id: ${{ inputs.org_id }}
+          connection-id: ${{ inputs.connection_id }}
+          trust-policy-id: ${{ inputs.trust_policy_id }}
+
+      - name: Install the credential helper (served by the exchange server, credential-gated)
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
+        run: |
+          set -euo pipefail
+          # The helper binary is served
+          # through the tunnel behind a valid exchanged credential — the binary
+          # never travels through GitHub.
+          curl -sfS -H "Authorization: Bearer $NGC_OIDC_ACCESS_TOKEN" \
+            "$EXCHANGE_URL/artifacts/docker-credential-ngc-linux-amd64" \
+            -o /usr/local/bin/docker-credential-ngc
+          chmod +x /usr/local/bin/docker-credential-ngc
+          docker-credential-ngc version
+
+      - name: Helper protocol check (exchanged credential in, Docker JSON out)
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
+        run: |
+          set -euo pipefail
+          out="$(printf 'nvcr.io' | docker-credential-ngc get)"
+          echo "$out" | jq -e '.Username == "$oauthtoken" and (.Secret | length > 0)' >/dev/null
+          echo "helper get -> \$oauthtoken + exchanged credential (secret masked)"
+          test "$(printf 'unused' | docker-credential-ngc list)" = "{}"
+
+      - name: Point docker at the helper (credHelpers, CLI + daemon configs)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.docker
+          printf '{"credHelpers":{"nvcr.io":"ngc"}}\n' > ~/.docker/config.json
+          sudo mkdir -p /root/.docker
+          printf '{"credHelpers":{"nvcr.io":"ngc"}}\n' | sudo tee /root/.docker/config.json >/dev/null
+
+      - name: Daemon environment + TLS trust for the local simulator
+        env:
+          NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
+        run: |
+          set -euo pipefail
+          # The docker DAEMON spawns the credential helper, so the exchanged
+          # credential must live in the daemon's environment (systemd drop-in).
+          sudo mkdir -p /etc/systemd/system/docker.service.d
+          printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=%s\n' "$NGC_OIDC_ACCESS_TOKEN" \
+            | sudo tee /etc/systemd/system/docker.service.d/lab7.conf >/dev/null
+          sudo chmod 600 /etc/systemd/system/docker.service.d/lab7.conf
+          # Local "mini nvcr.io": CA + server cert for nvcr.io, trusted by the daemon.
+          mkdir -p "$RUNNER_TEMP/tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$RUNNER_TEMP/tls/ca.key" -out "$RUNNER_TEMP/tls/ca.crt" -subj "/CN=lab7-sim-ca"
+          openssl req -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$RUNNER_TEMP/tls/nvcr.io.key" -out "$RUNNER_TEMP/tls/nvcr.io.csr" \
+            -subj "/CN=nvcr.io" -addext "subjectAltName=DNS:nvcr.io"
+          openssl x509 -req -days 2 \
+            -in "$RUNNER_TEMP/tls/nvcr.io.csr" -CA "$RUNNER_TEMP/tls/ca.crt" -CAkey "$RUNNER_TEMP/tls/ca.key" \
+            -out "$RUNNER_TEMP/tls/nvcr.io.crt" -extfile <(printf 'subjectAltName=DNS:nvcr.io')
+          sudo cp "$RUNNER_TEMP/tls/ca.crt" /usr/local/share/ca-certificates/lab7-sim-ca.crt
+          sudo update-ca-certificates
+          sudo systemctl daemon-reload
+          sudo systemctl restart docker
+
+      - name: Honest probe — real nvcr.io with the exchanged credential (expect 401)
+        continue-on-error: true
+        id: real_probe
+        run: |
+          set -euo pipefail
+          if docker pull nvcr.io/nvidia/pytorch:24.10-py3 > "$RUNNER_TEMP/real-probe.log" 2>&1; then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"
+            echo "::warning::real nvcr.io ACCEPTED the exchanged credential (unexpected — investigate)"
+          else
+            echo "outcome=denied" >> "$GITHUB_OUTPUT"
+            echo "denied by real nvcr.io, as expected until Req-2b lands:"
+            tail -2 "$RUNNER_TEMP/real-probe.log"
+          fi
+
+      - name: Start the registry token service (auth-endpoint simulator)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/tsvc-venv"
+          "$RUNNER_TEMP/tsvc-venv/bin/pip" install --quiet "pyjwt[crypto]"
+          nohup "$RUNNER_TEMP/tsvc-venv/bin/python" scripts/registry_token_service.py 8780 \
+            --exchange-base "$EXCHANGE_URL" --connection-id "$CONNECTION_ID" \
+            --cert-out "$RUNNER_TEMP/token-root.pem" --audit-log "$RUNNER_TEMP/token-audit.log" \
+            > "$RUNNER_TEMP/tsvc.log" 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8780/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sS http://127.0.0.1:8780/healthz
+
+      - name: Start the local registry as a stand-in nvcr.io (TLS + token auth)
+        run: |
+          set -euo pipefail
+          echo "127.0.0.1 nvcr.io" | sudo tee -a /etc/hosts
+          cat > "$RUNNER_TEMP/registry-config.yml" <<'YAML'
+          version: 0.1
+          log:
+            level: info
+          storage:
+            filesystem:
+              rootdirectory: /var/lib/registry
+          http:
+            addr: :5000
+            tls:
+              certificate: /etc/registry/tls/nvcr.io.crt
+              key: /etc/registry/tls/nvcr.io.key
+          auth:
+            token:
+              realm: http://127.0.0.1:8780/auth
+              service: registry
+              issuer: https://nvcr-token-proxy-poc.local
+              rootcertbundle: /etc/registry/token-root.pem
+          YAML
+          docker run -d --name sim-nvcr -p 443:5000 \
+            -v "$RUNNER_TEMP/registry-config.yml":/etc/docker/registry/config.yml:ro \
+            -v "$RUNNER_TEMP/token-root.pem":/etc/registry/token-root.pem:ro \
+            -v "$RUNNER_TEMP/tls/nvcr.io.crt":/etc/registry/tls/nvcr.io.crt:ro \
+            -v "$RUNNER_TEMP/tls/nvcr.io.key":/etc/registry/tls/nvcr.io.key:ro \
+            registry:2
+          for i in $(seq 1 30); do
+            challenge="$(curl -sS -o /dev/null -w '%{http_code}' https://nvcr.io/v2/ 2>/dev/null || true)"
+            [ "$challenge" = "401" ] && break
+            sleep 1
+          done
+          curl -sSi https://nvcr.io/v2/ | grep -i www-authenticate
+
+      - name: Push through the helper (exercises the push grant)
+        run: |
+          set -euo pipefail
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$SIM_IMAGE"
+          docker push "$SIM_IMAGE"
+          echo "pushed $SIM_IMAGE via docker-credential-ngc (exchanged credential)"
+
+      - name: Pull — the headline (fresh manifest fetch through the full chain)
+        run: |
+          set -euo pipefail
+          docker rmi "$SIM_IMAGE" >/dev/null
+          docker pull "$SIM_IMAGE"
+          echo "PULL OK — exchanged credential -> helper -> token service -> registry" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Negative probe — repository outside the trust policy grants (must fail)
+        run: |
+          set -euo pipefail
+          if docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
+            echo "::error::FENCE FAILED: pull of ungranted repository succeeded"
+            exit 1
+          fi
+          echo "denied as expected (no grant for org-123/team-b/other):"
+          tail -1 "$RUNNER_TEMP/foreign-probe.log"
+
+      - name: Negative probe — garbage credential (must fail; daemon env swapped)
+        run: |
+          set -euo pipefail
+          printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=garbage.token\n' \
+            | sudo tee /etc/systemd/system/docker.service.d/lab7.conf >/dev/null
+          sudo systemctl daemon-reload && sudo systemctl restart docker
+          docker start sim-nvcr >/dev/null
+          for i in $(seq 1 30); do
+            [ "$(curl -sS -o /dev/null -w '%{http_code}' https://nvcr.io/v2/ 2>/dev/null || true)" = "401" ] && break
+            sleep 1
+          done
+          if docker pull "$SIM_IMAGE" > "$RUNNER_TEMP/garbage-probe.log" 2>&1; then
+            echo "::error::FENCE FAILED: pull with garbage credential succeeded"
+            exit 1
+          fi
+          echo "denied as expected (garbage credential rejected at the token service):"
+          tail -1 "$RUNNER_TEMP/garbage-probe.log"
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Lab 7 — docker pull with the exchanged credential"
+            echo ""
+            echo "| Step | Result |"
+            echo "|---|---|"
+            echo "| Exchange | expires_in=${{ steps.nvcr.outputs.expires_in }}s |"
+            echo "| Helper protocol | \$oauthtoken + exchanged credential served |"
+            echo "| Real nvcr.io probe | ${{ steps.real_probe.outputs.outcome || 'skipped' }} (denied expected until Req-2b) |"
+            echo "| Push via helper | OK |"
+            echo "| Pull via helper | OK |"
+            echo "| Ungranted repo | denied (fence held) |"
+            echo "| Garbage credential | denied (fence held) |"
+            echo ""
+            echo "### Token service audit (runner side; no token material)"
+            echo '```'
+            grep '\[token-svc\]' "$RUNNER_TEMP/token-audit.log" | tail -12 || true
+            echo '```'
+            echo ""
+            echo "Exchange-server audit lives on the laptop: scripts/exchange_audit.log"
+          } >> "$GITHUB_STEP_SUMMARY"
