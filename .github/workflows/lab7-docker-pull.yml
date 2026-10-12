@@ -17,6 +17,10 @@ on:
         description: 'Trust policy selector'
         required: true
         default: 'policy-main'
+      credential_issuer:
+        description: 'Issuer identity the exchange server stamps into credentials (must match its --issuer)'
+        required: false
+        default: 'https://nvcr-exchange-poc.local'
 
 permissions:
   id-token: write
@@ -31,6 +35,7 @@ jobs:
       ORG_ID: ${{ inputs.org_id }}
       CONNECTION_ID: ${{ inputs.connection_id }}
       TRUST_POLICY_ID: ${{ inputs.trust_policy_id }}
+      CREDENTIAL_ISSUER: ${{ inputs.credential_issuer }}
       SIM_IMAGE: nvcr.io/org-123/team-a/image:v1
       FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
     steps:
@@ -129,6 +134,7 @@ jobs:
           "$RUNNER_TEMP/tsvc-venv/bin/pip" install --quiet "pyjwt[crypto]"
           nohup "$RUNNER_TEMP/tsvc-venv/bin/python" scripts/registry_token_service.py 8780 \
             --exchange-base "$EXCHANGE_URL" --connection-id "$CONNECTION_ID" \
+            --credential-issuer "$CREDENTIAL_ISSUER" \
             --cert-out "$RUNNER_TEMP/token-root.pem" --audit-log "$RUNNER_TEMP/token-audit.log" \
             > "$RUNNER_TEMP/tsvc.log" 2>&1 &
           for i in $(seq 1 30); do
