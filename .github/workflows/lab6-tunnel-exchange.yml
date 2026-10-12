@@ -17,6 +17,14 @@ on:
         description: 'Trust policy selector'
         required: true
         default: 'policy-main'
+      jwks_url:
+        description: 'JWKS URL for credential validation (default: <exchange_url>/.well-known/jwks.json; e.g. the S3 mirror)'
+        required: false
+        default: ''
+      credential_issuer:
+        description: 'Expected iss claim of the returned credential'
+        required: false
+        default: 'https://nvcr-exchange-poc.local'
 
 permissions:
   id-token: write
@@ -45,21 +53,23 @@ jobs:
           import jwt
           from jwt import PyJWKClient
           tok = os.environ["NVCR_ACCESS_TOKEN"]
-          base = os.environ["EXCHANGE_BASE"]
-          jwks = PyJWKClient(base + "/.well-known/jwks.json")
+          jwks_url = os.environ.get("JWKS_URL") or os.environ["EXCHANGE_BASE"] + "/.well-known/jwks.json"
+          jwks = PyJWKClient(jwks_url)
           claims = jwt.decode(
               tok,
               jwks.get_signing_key_from_jwt(tok).key,
               algorithms=["RS256"],
               audience="nvcr.io",
-              issuer="https://nvcr-exchange-poc.local",
+              issuer=os.environ.get("CREDENTIAL_ISSUER") or "https://nvcr-exchange-poc.local",
           )
           assert claims["exp"] > time.time(), "credential expired"
-          print("CREDENTIAL SIGNATURE VALID (verified against the exchange server's JWKS)")
+          print(f"CREDENTIAL SIGNATURE VALID (verified against JWKS: {jwks_url})")
           print(json.dumps(claims, indent=2))
           PY
         env:
           EXCHANGE_BASE: ${{ inputs.exchange_url }}
+          JWKS_URL: ${{ inputs.jwks_url }}
+          CREDENTIAL_ISSUER: ${{ inputs.credential_issuer }}
 
       - name: Subsequent-step consumption
         run: |
