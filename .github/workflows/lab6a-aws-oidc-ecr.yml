@@ -1,0 +1,62 @@
+name: lab6a-aws-oidc-ecr
+
+on:
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: 'Also push a tiny image to test write scope'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_ROLE: arn:aws:iam::563669631519:role/github-oidc-lab-pihao7
+  AWS_REGION: us-west-2
+  ECR_REPO: 563669631519.dkr.ecr.us-west-2.amazonaws.com/lab6a-oidc
+
+jobs:
+  keyless-ecr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assume AWS role via GitHub OIDC (no stored secrets)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Who am I to AWS
+        run: aws sts get-caller-identity
+
+      - name: Login to ECR (keyless hop #2)
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.ECR_REPO }}
+
+      - name: Push a tiny image
+        if: inputs.push_image
+        run: |
+          TAG=$(date +%s)
+          docker pull --quiet hello-world
+          docker tag hello-world $ECR_REPO:$TAG
+          docker push $ECR_REPO:$TAG
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Verify the image landed
+        if: inputs.push_image
+        run: |
+          aws ecr describe-images --repository-name lab6a-oidc \
+            --query 'imageDetails[].imageTags' --output text
+          aws ecr describe-images --repository-name lab6a-oidc \
+            --image-ids imageTag="$IMAGE_TAG" >/dev/null \
+            && echo "LAB6A PUSH VERIFIED: tag $IMAGE_TAG present in ECR"
+
+      - name: Assert the fence (account-wide ECR read must be DENIED)
+        run: |
+          if aws ecr describe-repositories >/dev/null 2>&1; then
+            echo "FENCE BROKEN: account-wide describe-repositories allowed"
+            exit 1
+          fi
+          echo "FENCE HELD: describe-repositories denied as expected"
