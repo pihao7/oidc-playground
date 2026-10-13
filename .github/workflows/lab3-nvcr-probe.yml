@@ -10,7 +10,7 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Try the proposed nvcr.io OIDC token exchange (Req-2b — NOT live yet)
+      - name: Try the proposed nvcr.io OIDC token exchange (NOT live yet)
         run: |
           NVCR_TOKEN=$(curl -sS \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -23,4 +23,4 @@ jobs:
             -d "subject_token=$NVCR_TOKEN" \
             -d "subject_token_type=urn:ietf:params:oauth:token-type:jwt" || true
 
-          echo "--- expected: the endpoint does not exist yet (Req-2b is the proposal) ---"
+          echo "--- expected: the endpoint does not exist yet ---"

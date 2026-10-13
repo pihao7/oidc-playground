@@ -1,7 +1,7 @@
 """Mock RFC 8693 token-exchange server for lab5 self-tests.
 
 Usage: python3 mock_rfc8693.py PORT MODE
-  MODE=ok     asserts the SDD section 3 request shape, returns 200 + canned JWT
+  MODE=ok     asserts the expected request shape, returns 200 + canned JWT
   MODE=reject returns 400 invalid_request (error-path test)
 """
 import base64

@@ -1,14 +1,14 @@
 name: 'NVCR OIDC Token Exchange'
 description: >
   Mints a GitHub OIDC ID token (audience-configurable) and exchanges it at the
-  NGC registry token-exchange endpoint for a short-lived registry access token,
-  per the "NGC Registry: OIDC Federation" SDD (RFC 8693 token exchange).
+  NGC registry token-exchange endpoint for a short-lived registry access token
+  (RFC 8693 token exchange).
   Writes the access token to $GITHUB_ENV for subsequent steps and to step outputs.
 author: 'pihao7'
 
 inputs:
   exchange-url:
-    description: 'Token exchange endpoint (SDD §3: POST /oauth/token)'
+    description: 'Token exchange endpoint (POST /oauth/token)'
     required: false
     default: 'https://nvcr.io/oauth/token'
   org-id:
@@ -26,7 +26,7 @@ inputs:
     required: false
     default: 'nvcr.io'
   subject-token-type:
-    description: 'subject_token_type form parameter (SDD §3)'
+    description: 'subject_token_type form parameter'
     required: false
     default: 'urn:ietf:params:oauth:token-type:id_token'
   env-var-name:

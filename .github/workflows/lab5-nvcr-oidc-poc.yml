@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       org_id:
-        description: 'NGC org id (onboarding handoff — SDD §3)'
+        description: 'NGC org id'
         required: true
         default: 'org-123'
       connection_id:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Exchange GitHub OIDC token for NVCR access token
         id: nvcr
-        # continue-on-error: the exchange endpoint is not live until Req-2b lands;
+        # continue-on-error: the exchange endpoint is not live yet;
         # a failure here still proves the client-side request shape (see the error body)
         continue-on-error: true
         uses: ./actions/nvcr-oidc-token
@@ -45,10 +45,10 @@ jobs:
           fi
           echo "token is available to this step (masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
 
-          # The real consumer — registry login (works once Req-2b is live):
+          # The real consumer — registry login (works once the exchange endpoint is live):
           echo "$NVCR_ACCESS_TOKEN" | docker login nvcr.io -u '$oauthtoken' --password-stdin \
             && echo "docker login OK" \
-            || echo "::warning::docker login rejected — Req-2b not live yet"
+            || echo "::warning::docker login rejected — exchange endpoint not live yet"
 
       - name: POC summary
         if: always()
@@ -59,6 +59,6 @@ jobs:
             echo "| Check | Result |"
             echo "|---|---|"
             echo "| Mint GitHub OIDC token (aud=nvcr.io) | ✓ always |"
-            echo "| Exchange at nvcr.io/oauth/token | ${{ steps.nvcr.outcome == 'success' && '✓' || '✗ (endpoint not live — expected until Req-2b)' }} |"
+            echo "| Exchange at nvcr.io/oauth/token | ${{ steps.nvcr.outcome == 'success' && '✓' || '✗ (endpoint not live — expected)' }} |"
             echo "| Access token in env for later steps | ${{ steps.nvcr.outcome == 'success' && '✓' || '—' }} |"
           } >> "$GITHUB_STEP_SUMMARY"

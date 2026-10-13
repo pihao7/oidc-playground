@@ -122,7 +122,7 @@ jobs:
             echo "::warning::real nvcr.io ACCEPTED the exchanged credential (unexpected — investigate)"
           else
             echo "outcome=denied" >> "$GITHUB_OUTPUT"
-            echo "denied by real nvcr.io, as expected until Req-2b lands:"
+            echo "denied by real nvcr.io, as expected while the exchange endpoint is not live:"
             tail -2 "$RUNNER_TEMP/real-probe.log"
           fi
 
@@ -240,7 +240,7 @@ jobs:
             echo "|---|---|"
             echo "| Exchange | expires_in=${{ steps.nvcr.outputs.expires_in }}s |"
             echo "| Helper protocol | \$oauthtoken + exchanged credential served |"
-            echo "| Real nvcr.io probe | ${{ steps.real_probe.outputs.outcome || 'not reached' }} (denied expected until Req-2b) |"
+            echo "| Real nvcr.io probe | ${{ steps.real_probe.outputs.outcome || 'not reached' }} (denied expected while the exchange endpoint is not live) |"
             echo "| Push via helper | ${{ steps.push.outputs.outcome || 'not reached' }} |"
             echo "| Pull via helper | ${{ steps.pull.outputs.outcome || 'not reached' }} |"
             echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} |"

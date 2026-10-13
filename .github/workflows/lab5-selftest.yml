@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start mock RFC 8693 server (asserts the SDD request shape)
+      - name: Start mock RFC 8693 server (asserts the expected request shape)
         run: |
           python3 .github/test/mock_rfc8693.py 18765 ok &
           sleep 1
