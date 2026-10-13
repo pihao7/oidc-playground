@@ -1,8 +1,8 @@
 name: 'NVCR OIDC Token Exchange'
 description: >
   Mints a GitHub OIDC ID token (audience-configurable) and exchanges it at the
-  NGC registry token-exchange endpoint for a short-lived registry access token,
-  per the RFC 8693 token exchange standard.
+  NGC registry token-exchange endpoint for a short-lived registry access token
+  (RFC 8693 token exchange).
   Writes the access token to $GITHUB_ENV for subsequent steps and to step outputs.
 author: 'pihao7'
 
