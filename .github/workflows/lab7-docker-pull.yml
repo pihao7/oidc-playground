@@ -17,10 +17,9 @@ on:
         description: 'Trust policy selector'
         required: true
         default: 'policy-main'
-      credential_issuer:
-        description: 'Issuer identity the exchange server stamps into credentials (must match its --issuer)'
-        required: false
-        default: 'https://nvcr-exchange-poc.local'
+      token_svc_url:
+        description: 'Stage-2 registry token service base (quick tunnel from vm1, no trailing slash)'
+        required: true
 
 permissions:
   id-token: write
@@ -35,7 +34,7 @@ jobs:
       ORG_ID: ${{ inputs.org_id }}
       CONNECTION_ID: ${{ inputs.connection_id }}
       TRUST_POLICY_ID: ${{ inputs.trust_policy_id }}
-      CREDENTIAL_ISSUER: ${{ inputs.credential_issuer }}
+      TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
       SIM_IMAGE: nvcr.io/org-123/team-a/image:v1
       FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
     steps:
@@ -127,27 +126,15 @@ jobs:
             tail -2 "$RUNNER_TEMP/real-probe.log"
           fi
 
-      - name: Start the registry token service (auth-endpoint simulator)
-        run: |
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/tsvc-venv"
-          "$RUNNER_TEMP/tsvc-venv/bin/pip" install --quiet "pyjwt[crypto]"
-          nohup "$RUNNER_TEMP/tsvc-venv/bin/python" scripts/registry_token_service.py 8780 \
-            --exchange-base "$EXCHANGE_URL" --connection-id "$CONNECTION_ID" \
-            --credential-issuer "$CREDENTIAL_ISSUER" \
-            --cert-out "$RUNNER_TEMP/token-root.pem" --audit-log "$RUNNER_TEMP/token-audit.log" \
-            > "$RUNNER_TEMP/tsvc.log" 2>&1 &
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8780/healthz >/dev/null && break
-            sleep 1
-          done
-          curl -sS http://127.0.0.1:8780/healthz
-
       - name: Start the local registry as a stand-in nvcr.io (TLS + token auth)
         run: |
           set -euo pipefail
           echo "127.0.0.1 nvcr.io" | sudo tee -a /etc/hosts
-          cat > "$RUNNER_TEMP/registry-config.yml" <<'YAML'
+          # stage 2 (the token service) runs on vm1 — fetch its rootcertbundle
+          # (public key material) and point the registry's realm at it
+          curl -sfS "$TOKEN_SVC_URL/cert.pem" -o "$RUNNER_TEMP/token-root.pem"
+          head -1 "$RUNNER_TEMP/token-root.pem" | grep -q "BEGIN CERTIFICATE"
+          cat > "$RUNNER_TEMP/registry-config.yml" <<YAML
           version: 0.1
           log:
             level: info
@@ -161,7 +148,7 @@ jobs:
               key: /etc/registry/tls/nvcr.io.key
           auth:
             token:
-              realm: http://127.0.0.1:8780/auth
+              realm: $TOKEN_SVC_URL/auth
               service: registry
               issuer: https://nvcr-token-proxy-poc.local
               rootcertbundle: /etc/registry/token-root.pem
@@ -259,10 +246,8 @@ jobs:
             echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} |"
             echo "| Garbage credential | ${{ steps.garbage_probe.outputs.outcome || 'not reached' }} |"
             echo ""
-            echo "### Token service audit (runner side; no token material)"
-            echo '```'
-            grep '\[token-svc\]' "$RUNNER_TEMP/token-audit.log" 2>/dev/null | tail -12 || true
-            echo '```'
-            echo ""
-            echo "Exchange-server audit lives on the laptop: scripts/exchange_audit.log"
+            echo "### Audits"
+            echo "- Exchange (stage 1): vm1 \`~/nvcr-exchange/exchange_audit.log\`"
+            echo "- Token service (stage 2): vm1 \`~/nvcr-exchange/registry_token_audit.log\`"
+            echo "Both log decisions only — no token material."
           } >> "$GITHUB_STEP_SUMMARY"
