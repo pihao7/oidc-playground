@@ -44,14 +44,11 @@ jobs:
           docker push $ECR_REPO:$TAG
           echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
 
-      - name: Verify the image landed
+      - name: Verify the image landed (pull it back)
         if: inputs.push_image
         run: |
-          aws ecr describe-images --repository-name lab6a-oidc \
-            --query 'imageDetails[].imageTags' --output text
-          aws ecr describe-images --repository-name lab6a-oidc \
-            --image-ids imageTag="$IMAGE_TAG" >/dev/null \
-            && echo "LAB6A PUSH VERIFIED: tag $IMAGE_TAG present in ECR"
+          docker pull $ECR_REPO:$IMAGE_TAG
+          echo "LAB6A PUSH VERIFIED: pulled $ECR_REPO:$IMAGE_TAG back from ECR"
 
       - name: Assert the fence (account-wide ECR read must be DENIED)
         run: |
