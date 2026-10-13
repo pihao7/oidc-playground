@@ -1,2 +1,4 @@
 __pycache__/
 scripts/exchange_audit.log
+.DS_Store
+.venv/
