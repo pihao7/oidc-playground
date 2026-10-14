@@ -30,8 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: init — mint + exchange + helper install + credHelpers
-        run: .github/scripts/docker_credential_ngc init
+      - name: nvcr_oidc_init — mint + exchange + helper install + credHelpers
+        run: .github/scripts/nvcr_oidc_init
 
       - name: Push (no docker login)
         run: |
