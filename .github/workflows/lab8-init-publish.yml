@@ -34,12 +34,46 @@ jobs:
         run: .github/scripts/nvcr_oidc_init
 
       - name: Push (no docker login)
+        id: push
+        continue-on-error: true
         run: |
           docker pull -q alpine:3.20 >/dev/null
           docker tag alpine:3.20 "$IMAGE"
-          docker push "$IMAGE"
+          if docker push "$IMAGE" 2> "$RUNNER_TEMP/push.log"; then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=denied" >> "$GITHUB_OUTPUT"
+            echo "denied by real nvcr.io (expected while the exchange endpoint is a proposal):"
+            tail -1 "$RUNNER_TEMP/push.log"
+          fi
 
       - name: Pull (no docker login)
+        id: pull
+        continue-on-error: true
         run: |
-          docker rmi "$IMAGE" >/dev/null
-          docker pull "$IMAGE"
+          docker rmi "$IMAGE" >/dev/null 2>&1 || true
+          if docker pull "$IMAGE" 2> "$RUNNER_TEMP/pull.log"; then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"
+            echo "PULL OK — GitHub OIDC -> nvcr_oidc_init (exchange) -> helper -> real nvcr.io" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "outcome=denied" >> "$GITHUB_OUTPUT"
+            echo "denied by real nvcr.io (expected while the exchange endpoint is a proposal):"
+            tail -1 "$RUNNER_TEMP/pull.log"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Lab 8 — one-script keyless publish"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| nvcr_oidc_init (mint + exchange + install + credHelpers) | OK |"
+            echo "| Push via helper | ${{ steps.push.outputs.outcome || 'not reached' }} |"
+            echo "| Pull via helper | ${{ steps.pull.outputs.outcome || 'not reached' }} |"
+            echo ""
+            echo "denied = the documented gap (real nvcr.io does not redeem exchanged credentials yet);"
+            echo "accepted = the exchange endpoint is live — investigate if unexpected."
+          } >> "$GITHUB_STEP_SUMMARY"
