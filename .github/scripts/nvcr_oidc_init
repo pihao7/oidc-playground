@@ -1,13 +1,18 @@
 #!/bin/sh
-# docker-credential-ngc — one script for the whole NGC keyless docker flow.
+# nvcr_oidc_init — one script for the whole NGC keyless docker flow.
 #
-# Docker only requires this filename and the get|store|erase|list protocol;
-# the other subcommands are workflow entry points, invisible to Docker:
+# Run with no arguments (or `init`) in a GitHub Actions workflow:
+#   mint a GitHub OIDC ID token -> exchange it at the NGC token-exchange
+#   service (RFC 8693) -> install self as the Docker credential helper
+#   `docker-credential-ngc` -> wire credHelpers. After that one step,
+#   docker pull/push need no docker login and store nothing.
+#
+# Docker spawns the installed copy under its required name; the protocol
+# subcommands and the finer-grained workflow entry points are:
 #   get|store|erase|list   Docker credential-helper protocol (spawned by Docker CLI)
-#   exchange               mint a GitHub OIDC ID token and exchange it at the NGC
-#                          token-exchange service (RFC 8693) → $GITHUB_ENV
-#   setup                  install self to ~/.docker/bin + wire credHelpers
-#   init                   exchange + setup in one step (the workflow entry point)
+#   exchange               mint + exchange only -> $GITHUB_ENV
+#   setup                  install + wire credHelpers only
+#   init                   exchange + setup (the default when no argument is given)
 #
 # Credential source (never stored, re-read on every invocation):
 #   NGC_OIDC_ACCESS_TOKEN  short-lived OIDC-exchanged token (preferred)
@@ -120,7 +125,7 @@ do_setup() {
     echo "installed $bin_dir/docker-credential-ngc; credHelpers configured in $config"
 }
 
-case "${1:-}" in
+case "${1:-init}" in
     get)      do_get ;;
     store)    echo "store unsupported: set NGC_OIDC_ACCESS_TOKEN, skip docker login" >&2; exit 1 ;;
     erase)    exit 0 ;;
@@ -128,5 +133,5 @@ case "${1:-}" in
     exchange) do_exchange ;;
     setup)    do_setup ;;
     init)     do_exchange && do_setup ;;
-    *)        echo "usage: $0 {get|store|erase|list|exchange|setup|init}" >&2; exit 1 ;;
+    *)        echo "usage: $0 [get|store|erase|list|exchange|setup|init]  (default: init)" >&2; exit 1 ;;
 esac
