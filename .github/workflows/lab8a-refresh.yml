@@ -38,9 +38,24 @@ jobs:
       - name: Init — mint + exchange (60s credential) + install helper + credHelpers
         run: .github/scripts/nvcr_oidc_init
 
-      - name: Sim registry as nvcr.io on :443 (realm -> vm1 token service via tunnel B)
+      - name: Daemon env + TLS trust + sim registry as nvcr.io on :443
         run: |
           set -euo pipefail
+          # The docker CLI resolves pull/push credentials itself on classic
+          # daemons, but containerd-image-store daemons resolve daemon-side —
+          # the helper is then spawned from the DAEMON's environment. Cover
+          # both: the credential goes into the daemon's env (systemd drop-in).
+          sudo mkdir -p /etc/systemd/system/docker.service.d
+          printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=%s\n' "$NGC_OIDC_ACCESS_TOKEN" \
+            | sudo tee /etc/systemd/system/docker.service.d/lab8a.conf >/dev/null
+          sudo chmod 600 /etc/systemd/system/docker.service.d/lab8a.conf
+          # live-restore: the refresh step restarts the daemon to swap the
+          # drop-in credential — the sim registry container survives it.
+          if [ -f /etc/docker/daemon.json ]; then
+            jq '. + {"live-restore": true}' /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json >/dev/null
+          else
+            echo '{"live-restore": true}' | sudo tee /etc/docker/daemon.json >/dev/null
+          fi
           # Local "mini nvcr.io" (lab 7 wiring): CA + server cert for nvcr.io,
           # trusted by the daemon and curl via the system store.
           mkdir -p "$RUNNER_TEMP/tls"
@@ -54,6 +69,7 @@ jobs:
             -out "$RUNNER_TEMP/tls/nvcr.io.crt" -extfile <(printf 'subjectAltName=DNS:nvcr.io')
           sudo cp "$RUNNER_TEMP/tls/ca.crt" /usr/local/share/ca-certificates/lab8a-sim-ca.crt
           sudo update-ca-certificates
+          sudo systemctl daemon-reload
           sudo systemctl restart docker
           echo "127.0.0.1 nvcr.io" | sudo tee -a /etc/hosts
           # stage 2 (the token service) runs on vm1 — fetch its rootcertbundle
@@ -120,6 +136,21 @@ jobs:
       - name: Refresh — on the 401, re-run the helper's exchange (new GitHub OIDC -> new credential)
         run: .github/scripts/nvcr_oidc_init exchange
 
+      - name: Swap the refreshed credential into the daemon env (drop-in + restart)
+        run: |
+          set -euo pipefail
+          printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=%s\n' "$NGC_OIDC_ACCESS_TOKEN" \
+            | sudo tee /etc/systemd/system/docker.service.d/lab8a.conf >/dev/null
+          sudo systemctl daemon-reload
+          sudo systemctl restart docker
+          # live-restore keeps sim-nvcr up; confirm the registry still challenges
+          for i in $(seq 1 30); do
+            challenge="$(curl -sS -o /dev/null -w '%{http_code}' https://nvcr.io/v2/ 2>/dev/null || true)"
+            [ "$challenge" = "401" ] && break
+            sleep 1
+          done
+          echo "daemon env swapped; sim registry still answering (challenge 401)"
+
       - name: Docker op 1 retry — push with the refreshed credential (expect OK)
         id: push_ok
         run: |
@@ -177,7 +208,7 @@ jobs:
             echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} |"
             echo ""
             echo "The refreshed credential is used in place — nothing is stored;"
-            echo "each docker op resolves through the helper from the environment."
+            echo "each docker op resolves through the helper (CLI env + daemon drop-in)."
             echo ""
             echo "### Audits (on vm1)"
             echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=60s"
