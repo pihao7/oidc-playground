@@ -35,7 +35,7 @@ jobs:
           DIGEST=$(echo "$OUT" | awk '/digest:/ {print $3}' | tail -1)
           echo "GHCR_REF=ghcr.io/${{ github.repository_owner }}/oidc-playground@$DIGEST" >> "$GITHUB_ENV"
 
-      - name: Control — keyless sign (Flow A: ambient OIDC -> Fulcio -> Rekor -> referrer)
+      - name: "Control — keyless sign (Flow A: ambient OIDC -> Fulcio -> Rekor -> referrer)"
         run: |
           OUT=$(cosign sign --yes "$GHCR_REF" 2>&1); echo "$OUT"
           echo "$OUT" | grep -oE 'index: [0-9]+' | tail -1 | sed 's/^/Rekor tlog /' >> "$GITHUB_STEP_SUMMARY" || true
@@ -79,7 +79,7 @@ jobs:
           echo "read HTTP $CODE — subject: nvcr.io/${REPO}@${DIGEST}"
           echo "NVCR_REF=nvcr.io/${REPO}@${DIGEST}" >> "$GITHUB_ENV"
 
-      - name: Probe — referrers endpoint (raw curl: GET + HEAD)
+      - name: "Probe — referrers endpoint (raw curl: GET + HEAD)"
         run: |
           REPO="${NVCR_REF#nvcr.io/}"; REPO="${REPO%%@*}"
           DIGEST="${NVCR_REF##*@}"
@@ -141,7 +141,7 @@ jobs:
           echo "outcome=$([ $RC -eq 0 ] && echo accepted || echo denied)" >> "$GITHUB_OUTPUT"
           { echo ""; echo "oras discover output (verbatim, truncated):"; echo '```'; printf '%.500s\n' "$OUT"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Probe — keyless verify (expected: no matching signatures — legacy .sig are key-based)
+      - name: "Probe — keyless verify (expected: no matching signatures — legacy .sig are key-based)"
         id: nvcr_verify
         continue-on-error: true
         run: |
