@@ -66,7 +66,7 @@ jobs:
           echo "docker push denied as expected (expired credential at the token service):"
           tail -2 "$RUNNER_TEMP/push-expired.log"
 
-      - name: Refresh — on the 401: re-exchange + swap the new credential into the daemon env
+      - name: Refresh — on the 401, re-exchange + swap the new credential into the daemon env
         run: |
           set -euo pipefail
           .github/scripts/nvcr_oidc_init exchange
