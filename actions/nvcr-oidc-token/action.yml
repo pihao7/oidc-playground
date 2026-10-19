@@ -8,9 +8,9 @@ author: 'pihao7'
 
 inputs:
   exchange-url:
-    description: 'Token exchange endpoint (POST /oauth/token)'
+    description: 'Token exchange endpoint base — the action POSTs to <base>/oauth/token (no trailing slash)'
     required: false
-    default: 'https://nvcr.io/oauth/token'
+    default: 'https://nvcr.io'
   org-id:
     description: 'NGC org identifier (from the onboarding handoff)'
     required: true
@@ -32,7 +32,7 @@ inputs:
   env-var-name:
     description: 'Name of the environment variable written to $GITHUB_ENV'
     required: false
-    default: 'NVCR_ACCESS_TOKEN'
+    default: 'NGC_OIDC_ACCESS_TOKEN'
 
 outputs:
   token:
@@ -57,12 +57,26 @@ runs:
           echo "::error::The job needs 'permissions: id-token: write' to mint OIDC tokens"
           exit 1
         fi
-        resp=$(curl -sS \
-          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}") \
-          || { echo "::error::OIDC token request failed"; exit 1; }
-        token=$(printf '%s' "$resp" | jq -er '.value') \
-          || { echo "::error::mint response had no .value: $resp"; exit 1; }
+        # the mint endpoint occasionally answers transiently (observed: HTTP 504
+        # "upstream request timeout" from GitHub's side, mid-job) — retry it
+        code=""; body=""
+        for attempt in 1 2 3; do
+          resp=$(curl -sS -w '\n%{http_code}' \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}") \
+            || { echo "::warning::OIDC token request failed (attempt $attempt)"; sleep 5; continue; }
+          code=$(printf '%s' "$resp" | tail -n1)
+          body=$(printf '%s' "$resp" | sed '$d')
+          if [ "$code" = "200" ]; then break; fi
+          echo "::warning::OIDC token request returned HTTP $code (attempt $attempt): $(printf '%s' "$body" | head -c 200)"
+          sleep 5
+        done
+        if [ "$code" != "200" ]; then
+          echo "::error::OIDC token request failed after 3 attempts (last HTTP $code)"
+          exit 1
+        fi
+        token=$(printf '%s' "$body" | jq -er '.value') \
+          || { echo "::error::mint response had no .value: $body"; exit 1; }
         echo "::add-mask::${token}"
         printf '%s' "$token" > "$RUNNER_TEMP/nvcr-oidc-id-token.jwt"
         echo "minted ID token: ${#token} chars, aud=${AUDIENCE}"
@@ -87,7 +101,7 @@ runs:
         id_token="$(cat "$RUNNER_TEMP/nvcr-oidc-id-token.jwt")"
         args=(
           -sS -w '\n%{http_code}'
-          -X POST "$EXCHANGE_URL"
+          -X POST "${EXCHANGE_URL%/}/oauth/token"
           --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange"
           --data-urlencode "subject_token=${id_token}"
           --data-urlencode "subject_token_type=${SUBJECT_TOKEN_TYPE}"

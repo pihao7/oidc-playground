@@ -23,15 +23,15 @@ jobs:
         id: nvcr
         uses: ./actions/nvcr-oidc-token
         with:
-          exchange-url: http://127.0.0.1:18765/oauth/token
+          exchange-url: http://127.0.0.1:18765
           org-id: org-123
           connection-id: conn-github
           trust-policy-id: policy-main
 
       - name: Assert the token reached this subsequent step
         run: |
-          test -n "${NVCR_ACCESS_TOKEN:-}" || { echo "::error::NVCR_ACCESS_TOKEN missing in env"; exit 1; }
-          echo "OK: NVCR_ACCESS_TOKEN present (${#NVCR_ACCESS_TOKEN} chars, masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
+          test -n "${NGC_OIDC_ACCESS_TOKEN:-}" || { echo "::error::NGC_OIDC_ACCESS_TOKEN missing in env"; exit 1; }
+          echo "OK: NGC_OIDC_ACCESS_TOKEN present (${#NGC_OIDC_ACCESS_TOKEN} chars, masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
           echo "POSITIVE SELFTEST PASSED" >> "$GITHUB_STEP_SUMMARY"
 
   negative:
@@ -51,7 +51,7 @@ jobs:
         continue-on-error: true
         uses: ./actions/nvcr-oidc-token
         with:
-          exchange-url: http://127.0.0.1:18766/oauth/token
+          exchange-url: http://127.0.0.1:18766
           org-id: org-123
           connection-id: conn-github
 

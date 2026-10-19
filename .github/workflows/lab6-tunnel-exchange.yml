@@ -40,7 +40,7 @@ jobs:
         id: nvcr
         uses: ./actions/nvcr-oidc-token
         with:
-          exchange-url: ${{ inputs.exchange_url }}/oauth/token
+          exchange-url: ${{ inputs.exchange_url }}
           org-id: ${{ inputs.org_id }}
           connection-id: ${{ inputs.connection_id }}
           trust-policy-id: ${{ inputs.trust_policy_id }}
@@ -52,7 +52,7 @@ jobs:
           import json, os, time
           import jwt
           from jwt import PyJWKClient
-          tok = os.environ["NVCR_ACCESS_TOKEN"]
+          tok = os.environ["NGC_OIDC_ACCESS_TOKEN"]
           jwks_url = os.environ.get("JWKS_URL") or os.environ["EXCHANGE_BASE"] + "/.well-known/jwks.json"
           jwks = PyJWKClient(jwks_url)
           claims = jwt.decode(
@@ -73,6 +73,6 @@ jobs:
 
       - name: Subsequent-step consumption
         run: |
-          test -n "${NVCR_ACCESS_TOKEN:-}" || { echo "::error::NVCR_ACCESS_TOKEN missing in env"; exit 1; }
-          echo "OK: token present in a later step (${#NVCR_ACCESS_TOKEN} chars, masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
+          test -n "${NGC_OIDC_ACCESS_TOKEN:-}" || { echo "::error::NGC_OIDC_ACCESS_TOKEN missing in env"; exit 1; }
+          echo "OK: token present in a later step (${#NGC_OIDC_ACCESS_TOKEN} chars, masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
           echo "LAB6 E2E PASSED — mint → tunnel exchange → credential validated → env consumption" >> "$GITHUB_STEP_SUMMARY"

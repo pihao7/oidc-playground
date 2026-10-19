@@ -26,7 +26,7 @@ jobs:
       EXCHANGE_URL: ${{ inputs.exchange_url }}
       NGC_ORG: ${{ inputs.org_id }}
       NGC_CONNECTION_ID: ${{ inputs.connection_id }}
-      IMAGE: nvcr.io/org-123/team-a/image:v1
+      IMAGE: nvcr.io/${{ inputs.org_id }}/team-a/image:v1
     steps:
       - uses: actions/checkout@v4
 

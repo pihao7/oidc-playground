@@ -40,13 +40,13 @@ jobs:
         if: steps.nvcr.outcome == 'success'
         run: |
           set -euo pipefail
-          if [ -z "${NVCR_ACCESS_TOKEN:-}" ]; then
-            echo "::error::NVCR_ACCESS_TOKEN not present in env"; exit 1
+          if [ -z "${NGC_OIDC_ACCESS_TOKEN:-}" ]; then
+            echo "::error::NGC_OIDC_ACCESS_TOKEN not present in env"; exit 1
           fi
           echo "token is available to this step (masked), expires_in=${{ steps.nvcr.outputs.expires_in }}s"
 
           # The real consumer — registry login (works once the exchange endpoint is live):
-          echo "$NVCR_ACCESS_TOKEN" | docker login nvcr.io -u '$oauthtoken' --password-stdin \
+          echo "$NGC_OIDC_ACCESS_TOKEN" | docker login nvcr.io -u '$oauthtoken' --password-stdin \
             && echo "docker login OK" \
             || echo "::warning::docker login rejected — exchange endpoint not live yet"
 

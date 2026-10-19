@@ -35,8 +35,8 @@ jobs:
       CONNECTION_ID: ${{ inputs.connection_id }}
       TRUST_POLICY_ID: ${{ inputs.trust_policy_id }}
       TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
-      SIM_IMAGE: nvcr.io/org-123/team-a/image:v1
-      FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
+      SIM_IMAGE: nvcr.io/${{ inputs.org_id }}/team-a/image:v1
+      FOREIGN_IMAGE: nvcr.io/${{ inputs.org_id }}/team-b/other:v1
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
         id: nvcr
         uses: ./actions/nvcr-oidc-token
         with:
-          exchange-url: ${{ inputs.exchange_url }}/oauth/token
+          exchange-url: ${{ inputs.exchange_url }}
           org-id: ${{ inputs.org_id }}
           connection-id: ${{ inputs.connection_id }}
           trust-policy-id: ${{ inputs.trust_policy_id }}
@@ -202,7 +202,7 @@ jobs:
             exit 1
           fi
           echo "outcome=held" >> "$GITHUB_OUTPUT"
-          echo "denied as expected (no grant for org-123/team-b/other):"
+          echo "denied as expected (no grant for $FOREIGN_IMAGE):"
           tail -1 "$RUNNER_TEMP/foreign-probe.log"
 
       - name: Negative probe — garbage credential (must fail; both env paths swapped)

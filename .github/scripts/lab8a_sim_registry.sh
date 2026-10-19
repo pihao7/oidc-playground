@@ -55,6 +55,7 @@ wait_for_challenge() {
 
 do_up() {
     : "${TOKEN_SVC_URL:?TOKEN_SVC_URL is required (stage-2 token service base, tunnel B)}"
+    TOKEN_SVC_URL="${TOKEN_SVC_URL%/}"
 
     # 1. classic image store: pull/push credentials resolve CLI-side — the CLI
     #    spawns the helper from the step's environment; no daemon env, no

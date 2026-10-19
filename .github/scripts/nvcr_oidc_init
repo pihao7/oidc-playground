@@ -66,6 +66,7 @@ do_exchange() {
     : "${EXCHANGE_URL:?EXCHANGE_URL is required}"
     : "${NGC_ORG:?NGC_ORG is required}"
     : "${NGC_CONNECTION_ID:?NGC_CONNECTION_ID is required}"
+    EXCHANGE_URL="${EXCHANGE_URL%/}"
     OIDC_AUDIENCE="${OIDC_AUDIENCE:-nvcr.io}"
     EXCHANGE_AUDIENCE="${EXCHANGE_AUDIENCE:-nvcr.io}"
     ENV_VAR_NAME="${ENV_VAR_NAME:-NGC_OIDC_ACCESS_TOKEN}"
