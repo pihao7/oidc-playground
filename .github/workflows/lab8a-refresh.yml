@@ -122,18 +122,6 @@ jobs:
         id: push_expired
         run: |
           set -euo pipefail
-          # TEMPORARY diagnostic: log how docker actually invokes the helper
-          # (stdin form, env presence, caller process) — removed once green
-          for pair in "$HOME/.docker/bin/docker-credential-ngc" /usr/local/bin/docker-credential-ngc; do
-            sudo mv "$pair" "$pair.real"
-            sudo tee "$pair" >/dev/null <<'SHIM'
-          #!/bin/sh
-          input=$(cat)
-          { echo "=== argv: $* | caller: $(cat /proc/$PPID/comm 2>/dev/null)"; echo "stdin: $input"; echo "env NGC_OIDC_ACCESS_TOKEN: ${NGC_OIDC_ACCESS_TOKEN:+set}"; } >> /tmp/helper-debug.log
-          printf '%s' "$input" | "$0.real" "$@"
-          SHIM
-            sudo chmod 755 "$pair"
-          done
           # direct probe first: the token service's 401 for the expired credential,
           # verbatim — the smoking gun the docker push below hits through the daemon
           code="$(curl -sS -o "$RUNNER_TEMP/tsvc-probe.json" -w '%{http_code}' \
@@ -214,11 +202,6 @@ jobs:
           )"
           {
             echo "## Lab 8a — 401-triggered credential refresh"
-            echo ""
-            echo "### Helper invocation trace (temporary diagnostic)"
-            echo '```'
-            sudo cat /tmp/helper-debug.log 2>/dev/null || echo "(no helper invocations logged)"
-            echo '```'
             echo ""
             echo "| Step | Result |"
             echo "| --- | --- |"
