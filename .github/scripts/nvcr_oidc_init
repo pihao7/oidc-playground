@@ -39,7 +39,16 @@ set -eu
 NGC_HOSTS="nvcr.io dev.nvcr.io stg.nvcr.io canary.nvcr.io"
 
 do_get() {
-    read -r host
+    # docker hands the helper the ServerURL with no trailing newline (and the
+    # daemon-side resolution path may use URL or JSON forms) — read all of
+    # stdin and normalize, matching the Go binary's tolerance
+    host=$(cat)
+    case "$host" in
+        '{'*) host=$(printf '%s' "$host" | sed -n 's/.*"ServerURL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') ;;
+    esac
+    host=${host#*://}
+    host=${host%%/*}
+    host=${host%%:*}
     for h in $NGC_HOSTS; do
         [ "$host" = "$h" ] || continue
         token="${NGC_OIDC_ACCESS_TOKEN:-${NGC_CLI_API_KEY:-}}"
