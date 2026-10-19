@@ -80,15 +80,22 @@ do_exchange() {
         exit 1
     fi
 
-    resp=$(curl -sS -w '\n%{http_code}' -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-        "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}") \
-        || { echo "::error::OIDC token request failed" >&2; exit 1; }
-    code=$(printf '%s' "$resp" | tail -n1)
-    body=$(printf '%s' "$resp" | sed '$d')
+    # the mint endpoint occasionally answers transiently (observed: HTTP 504
+    # "upstream request timeout" from GitHub's side, mid-job) — retry it
+    mint_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}"
+    code=""; body=""
+    for attempt in 1 2 3; do
+        resp=$(curl -sS -w '\n%{http_code}' -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$mint_url") \
+            || { echo "::warning::OIDC token request failed (attempt $attempt)" >&2; sleep 5; continue; }
+        code=$(printf '%s' "$resp" | tail -n1)
+        body=$(printf '%s' "$resp" | sed '$d')
+        if [ "$code" = "200" ]; then break; fi
+        echo "::warning::OIDC token request returned HTTP $code (attempt $attempt): $(printf '%s' "$body" | head -c 200)" >&2
+        sleep 5
+    done
     if [ "$code" != "200" ]; then
-        # error bodies carry no token material — show them; a 200 body could,
-        # so it stays hidden (only "no .value" is reported)
-        echo "::error::OIDC token request returned HTTP $code: $(printf '%s' "$body" | head -c 300)" >&2
+        echo "::error::OIDC token request failed after 3 attempts (last HTTP $code)" >&2
         exit 1
     fi
     id_token=$(printf '%s' "$body" | jq -er .value) \
