@@ -15,7 +15,9 @@ permissions:
 #   - docker-credential-envtest — logs its parent process chain and whether
 #     TEST_MARKER (set only in the step shell) is in its environment, then
 #     serves a canned credential for the test host
-#   - fake registry on :5000 — always answers the spec's 401 Bearer challenge
+#   - fake registry on :5000 over trusted HTTPS (self-signed cert for the name
+#     in the system store — mirrors the lab: no insecure-registries anywhere) —
+#     always answers the spec's 401 Bearer challenge
 #   - fake token service on :5001 — logs the exact Authorization header the
 #     client presented (Basic probe-user:... = the helper's credential arrived;
 #     <none> = the credential was dropped somewhere in between)
@@ -39,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rig — logging helper + fake 401 registry + logging token service
+      - name: Rig — logging helper + fake HTTPS 401 registry + logging token service
         run: |
           set -euo pipefail
           echo "docker server: $(docker version --format '{{.Server.Version}}')"
@@ -74,8 +76,14 @@ jobs:
               fi
           done
 
-          # 3. the name resolves locally, http exempted from TLS in daemon.json
+          # 3. the name resolves locally; TLS is genuinely trusted (self-signed
+          #    cert FOR the name, in the system store — same trick as the lab)
           echo "127.0.0.1 envtest.invalid" | sudo tee -a /etc/hosts >/dev/null
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+              -keyout "$RUNNER_TEMP/envtest.key" -out "$RUNNER_TEMP/envtest.crt" \
+              -subj "/CN=envtest.invalid" -addext "subjectAltName=DNS:envtest.invalid" 2>/dev/null
+          sudo cp "$RUNNER_TEMP/envtest.crt" /usr/local/share/ca-certificates/envtest.crt
+          sudo update-ca-certificates
 
           # 4. fake token service (:5001) — logs exactly what the client presented
           cat > "$RUNNER_TEMP/tsvc.py" <<'TSVC'
@@ -89,8 +97,9 @@ jobs:
               def log_message(self, *a): pass
           HTTPServer(("127.0.0.1", 5001), H).serve_forever()
           TSVC
-          # 5. fake registry (:5000) — always answers with the 401 Bearer challenge
+          # 5. fake registry (:5000, HTTPS) — always answers with the 401 challenge
           cat > "$RUNNER_TEMP/fakereg.py" <<'FAKEREG'
+          import ssl
           from http.server import HTTPServer, BaseHTTPRequestHandler
           class H(BaseHTTPRequestHandler):
               def do_GET(self):
@@ -100,18 +109,22 @@ jobs:
                   self.end_headers()
                   self.wfile.write(b"{}")
               def log_message(self, *a): pass
-          HTTPServer(("127.0.0.1", 5000), H).serve_forever()
+          srv = HTTPServer(("127.0.0.1", 5000), H)
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          ctx.load_cert_chain("/tmp/envtest.crt", "/tmp/envtest.key")
+          srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+          srv.serve_forever()
           FAKEREG
+          cp "$RUNNER_TEMP/envtest.crt" "$RUNNER_TEMP/envtest.key" /tmp/
           nohup python3 "$RUNNER_TEMP/tsvc.py" >/dev/null 2>&1 &
           nohup python3 "$RUNNER_TEMP/fakereg.py" >/dev/null 2>&1 &
           sleep 1
-          curl -sS -o /dev/null -w 'fake registry challenge: HTTP %{http_code}\n' http://127.0.0.1:5000/v2/
+          curl -sS -o /dev/null -w 'fake registry challenge: HTTP %{http_code}\n' https://envtest.invalid:5000/v2/
 
       - name: 'Probe — classic store (containerd-snapshotter: false)'
         run: |
           set -euo pipefail
-          echo '{"features":{"containerd-snapshotter":false},"insecure-registries":["envtest.invalid:5000"]}' \
-            | sudo tee /etc/docker/daemon.json >/dev/null
+          echo '{"features":{"containerd-snapshotter":false}}' | sudo tee /etc/docker/daemon.json >/dev/null
           sudo systemctl restart docker
           echo "store now: $(docker info 2>/dev/null | grep -i 'storage driver')"
           : > /tmp/envtest-helper.log; : > /tmp/tsvc.log
@@ -128,8 +141,7 @@ jobs:
       - name: 'Probe — containerd store (containerd-snapshotter: true)'
         run: |
           set -euo pipefail
-          echo '{"features":{"containerd-snapshotter":true},"insecure-registries":["envtest.invalid:5000"]}' \
-            | sudo tee /etc/docker/daemon.json >/dev/null
+          echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json >/dev/null
           sudo systemctl restart docker
           echo "store now: $(docker info 2>/dev/null | grep -i 'storage driver')"
           : > /tmp/envtest-helper.log; : > /tmp/tsvc.log
@@ -182,5 +194,4 @@ jobs:
             sudo journalctl -u docker --no-pager --since '-15 min' 2>/dev/null \
               | grep -iE "host doesn't match|credential|authoriz" | tail -15 || true
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "verdict written to step summary"
+          } | tee "$RUNNER_TEMP/verdict.md" >> "$GITHUB_STEP_SUMMARY"
