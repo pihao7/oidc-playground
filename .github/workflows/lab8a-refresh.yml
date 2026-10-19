@@ -55,8 +55,8 @@ jobs:
           print(f"credential validity left: {left}s")
           assert left > 5, "credential already expired — the setup steps ate the TTL"
           PY
-          docker pull -q alpine:3.20 >/dev/null
-          docker tag alpine:3.20 "$IMAGE"
+          docker pull -q hello-world:latest >/dev/null
+          docker tag hello-world:latest "$IMAGE"
           docker push "$IMAGE"
           docker rmi "$IMAGE" >/dev/null
           docker pull "$IMAGE"
