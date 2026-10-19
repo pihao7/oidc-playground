@@ -13,9 +13,9 @@ on:
         required: true
         default: 'org-123'
       connection_id:
-        description: 'OIDC connection id — this lab uses the 60s-TTL connection'
+        description: 'OIDC connection id — this lab uses the 30s-TTL connection'
         required: true
-        default: 'conn-github-60s'
+        default: 'conn-github-30s'
 
 permissions:
   id-token: write
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Init — mint + exchange (60s credential) + install helper + credHelpers
+      - name: Init — mint + exchange (30s credential) + install helper + credHelpers
         run: .github/scripts/nvcr_oidc_init
 
       - name: Daemon env + TLS trust + sim registry as nvcr.io on :443
@@ -113,10 +113,10 @@ jobs:
           done
           curl -sSi https://nvcr.io/v2/ | grep -i www-authenticate
 
-      - name: Wait out the 60s credential TTL
+      - name: Wait out the 30s credential TTL
         run: |
-          echo "credential TTL is 60s ($NGC_CONNECTION_ID); waiting 70s so docker op 1 starts expired"
-          sleep 70
+          echo "credential TTL is 30s ($NGC_CONNECTION_ID); waiting 40s so docker op 1 starts expired"
+          sleep 40
 
       - name: Docker op 1 — push with the expired credential (expect 401)
         id: push_expired
@@ -216,6 +216,6 @@ jobs:
             echo "each docker op resolves through the helper (CLI env + daemon drop-in)."
             echo ""
             echo "### Audits (on vm1)"
-            echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=60s"
+            echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=30s"
             echo "- Token service (stage 2): \`~/nvcr-exchange/registry_token_audit.log\` — the 401 (ExpiredSignatureError) then the OKs"
           } >> "$GITHUB_STEP_SUMMARY"
