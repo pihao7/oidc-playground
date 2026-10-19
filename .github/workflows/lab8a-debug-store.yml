@@ -93,15 +93,24 @@ jobs:
           sudo cp "$RUNNER_TEMP/envtest.crt" /usr/local/share/ca-certificates/envtest.crt
           sudo update-ca-certificates
 
-          # 4. fake token service (:5001) — logs exactly what the client presented
+          # 4. fake token service (:5001) — logs exactly what the client presented.
+          #    The classic path fetches tokens with GET + Basic auth; the
+          #    containerd path uses POST (oauth2 form) — log both the header
+          #    and the body
           cat > "$RUNNER_TEMP/tsvc.py" <<'TSVC'
           from http.server import HTTPServer, BaseHTTPRequestHandler
           class H(BaseHTTPRequestHandler):
-              def do_GET(self):
+              def log_req(self):
+                  length = int(self.headers.get("Content-Length", 0) or 0)
+                  body = self.rfile.read(length).decode() if length else ""
                   with open("/tmp/tsvc.log", "a") as f:
-                      f.write(f"{self.path} | Authorization: {self.headers.get('Authorization', '<none>')}\n")
+                      f.write(f"{self.command} {self.path} | Authorization: {self.headers.get('Authorization', '<none>')}\n")
+                      if body:
+                          f.write(f"  body: {body}\n")
                   self.send_response(401)
                   self.end_headers()
+              do_GET = log_req
+              do_POST = log_req
               def log_message(self, *a): pass
           HTTPServer(("127.0.0.1", 5001), H).serve_forever()
           TSVC
