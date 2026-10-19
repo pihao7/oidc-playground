@@ -44,7 +44,12 @@ jobs:
           # The docker CLI resolves pull/push credentials itself on classic
           # daemons, but containerd-image-store daemons resolve daemon-side —
           # the helper is then spawned from the DAEMON's environment. Cover
-          # both: the credential goes into the daemon's env (systemd drop-in).
+          # both paths (lab 7 wiring): helper on the daemon's PATH, credHelpers
+          # in the daemon's own config (HOME=/root), credential in the daemon's
+          # env (systemd drop-in).
+          sudo install -m 755 .github/scripts/nvcr_oidc_init /usr/local/bin/docker-credential-ngc
+          sudo mkdir -p /root/.docker
+          printf '{"credHelpers":{"nvcr.io":"ngc"}}\n' | sudo tee /root/.docker/config.json >/dev/null
           sudo mkdir -p /etc/systemd/system/docker.service.d
           printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=%s\n' "$NGC_OIDC_ACCESS_TOKEN" \
             | sudo tee /etc/systemd/system/docker.service.d/lab8a.conf >/dev/null
