@@ -30,33 +30,41 @@ jobs:
       NGC_ORG: ${{ inputs.org_id }}
       NGC_CONNECTION_ID: ${{ inputs.connection_id }}
       TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
-      IMAGE: nvcr.io/org-123/team-a/image:v1
-      FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
+      IMAGE: nvcr.io/${{ inputs.org_id }}/team-a/image:v1
+      FOREIGN_IMAGE: nvcr.io/${{ inputs.org_id }}/team-b/other:v1
       DEMO_IMAGE_REF: hello-world@sha256:11a3eb1597e864c51b3f56733cb2e8a90bf0c284bfc05f9444d81c558bc848aa
     steps:
       - uses: actions/checkout@v4
 
-      - name: Init — mint + exchange (30s credential) + install helper + credHelpers
-        run: .github/scripts/nvcr_oidc_init
-
+      # everything slow happens BEFORE the exchange — the 30s clock starts in
+      # the init step, so registry bring-up and the demo pull can't eat the TTL
       - name: Classic image store + TLS trust + sim registry as nvcr.io on :443
+        id: sim
         run: .github/scripts/lab8a_sim_registry.sh up
+
+      - name: Pre-pull the demo image (before the 30s clock starts)
+        run: |
+          set -euo pipefail
+          docker pull -q "$DEMO_IMAGE_REF" >/dev/null
+
+      - name: Init — mint + exchange (30s credential) + install helper + credHelpers
+        id: init
+        run: .github/scripts/nvcr_oidc_init
 
       - name: Docker ops with the FRESH credential — push + pull (expect OK)
         id: fresh_ops
         run: |
           set -euo pipefail
           # guard: the fresh phase must run inside the credential's TTL — fail
-          # loudly here rather than with a confusing 401 below if setup ate it
+          # loudly here rather than with a confusing 401 below if the gap ate it
           python3 - <<'PY'
           import os, base64, json, time
           seg = os.environ["NGC_OIDC_ACCESS_TOKEN"].split(".")[1]
           seg += "=" * (-len(seg) % 4)
           left = json.loads(base64.urlsafe_b64decode(seg))["exp"] - int(time.time())
           print(f"credential validity left: {left}s")
-          assert left > 5, "credential already expired — the setup steps ate the TTL"
+          assert left > 5, "credential already expired — the init-to-ops gap ate the TTL"
           PY
-          docker pull -q "$DEMO_IMAGE_REF" >/dev/null
           docker tag "$DEMO_IMAGE_REF" "$IMAGE"
           .github/scripts/nvcr_docker push "$IMAGE"
           docker rmi "$IMAGE" >/dev/null
@@ -65,9 +73,21 @@ jobs:
             "the 401 below can only be the TTL" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Wait out the 30s credential TTL
+        id: wait
         run: |
           echo "credential TTL is 30s ($NGC_CONNECTION_ID); waiting 40s so docker op 1 starts expired"
           sleep 40
+          # symmetric guard: prove the credential really is expired, so the
+          # auth failure below is the TTL and nothing else (e.g. a
+          # longer-TTL connection passed in at dispatch)
+          python3 - <<'PY'
+          import os, base64, json, time
+          seg = os.environ["NGC_OIDC_ACCESS_TOKEN"].split(".")[1]
+          seg += "=" * (-len(seg) % 4)
+          left = json.loads(base64.urlsafe_b64decode(seg))["exp"] - int(time.time())
+          print(f"credential validity left: {left}s")
+          assert left < 0, f"credential still valid ({left}s left) — {os.environ['NGC_CONNECTION_ID']} is not the 30s-TTL connection"
+          PY
 
       - name: Docker op 1 — push on an expired credential (the wrap script refreshes + retries)
         id: push_ok
@@ -76,7 +96,7 @@ jobs:
           # direct probe first: the token service's 401 for the expired credential,
           # verbatim — what the wrapped push below will hit and recover from
           code="$(curl -sS -o "$RUNNER_TEMP/tsvc-probe.json" -w '%{http_code}' \
-            "$TOKEN_SVC_URL/auth?service=registry&scope=repository:org-123/team-a/image:pull,push" \
+            "$TOKEN_SVC_URL/auth?service=registry&scope=repository:$NGC_ORG/team-a/image:pull,push" \
             -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" || true)"
           echo "direct token-service probe with the expired credential -> HTTP $code"
           cat "$RUNNER_TEMP/tsvc-probe.json"
@@ -103,7 +123,7 @@ jobs:
             exit 1
           fi
           echo "outcome=held" >> "$GITHUB_OUTPUT"
-          echo "denied as expected (no grant for org-123/team-b/other):"
+          echo "denied as expected (no grant for $FOREIGN_IMAGE):"
           tail -1 "$RUNNER_TEMP/foreign-probe.log"
 
       - name: Summary
@@ -126,11 +146,13 @@ jobs:
             echo ""
             echo "| Step | Result |"
             echo "| --- | --- |"
-            echo "| Init (mint + exchange + helper install + credHelpers) | OK — exchange #1 |"
-            echo "| Fresh push + pull (before the wait) | OK — the setup is sound |"
-            echo "| Push on the expired credential | OK — nvcr_docker detected the expiry, refreshed (exchange #2, $claims), retried |"
-            echo "| Pull (op 2) | ${{ steps.pull_ok.outcome || 'skipped' }} |"
-            echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} — held: the credential was still valid, so nvcr_docker did not refresh (a denial is not fixed by a new token) |"
+            echo "| Sim registry up (before the 30s clock) | ${{ steps.sim.outcome || 'not reached' }} |"
+            echo "| Init (mint + exchange + helper install + credHelpers) | ${{ steps.init.outcome || 'not reached' }} — exchange #1 |"
+            echo "| Fresh push + pull (inside the TTL) | ${{ steps.fresh_ops.outcome || 'not reached' }} — the setup is sound |"
+            echo "| Credential confirmed expired after the wait | ${{ steps.wait.outcome || 'not reached' }} |"
+            echo "| Push on the expired credential | ${{ steps.push_ok.outcome || 'not reached' }} — nvcr_docker refreshed (exchange #2, $claims) + retried |"
+            echo "| Pull (op 2) | ${{ steps.pull_ok.outcome || 'not reached' }} |"
+            echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} — held: nvcr_docker did not refresh (a denial is not fixed by a new token) |"
             echo ""
             echo "The workflow author only ever runs .github/scripts/nvcr_docker push/pull — the expiry"
             echo "detection, re-mint + re-exchange, and retry are inside the wrap script."

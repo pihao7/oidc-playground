@@ -93,7 +93,11 @@ run_wrapped() {
         printf '%s\n' "$output" >&2
         return "$status"
     fi
-    echo "auth failure with an expired credential (expired $(( -left ))s ago) — refreshing + retrying" >&2
+    if [ "$left" -lt 0 ]; then
+        echo "auth failure with an expired credential (expired $(( -left ))s ago) — refreshing + retrying" >&2
+    else
+        echo "auth failure with a credential ${left}s from expiry — refreshing + retrying" >&2
+    fi
     if ! refresh; then
         printf '%s\n' "$output" >&2
         return 1
