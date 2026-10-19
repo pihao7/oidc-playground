@@ -194,4 +194,6 @@ jobs:
             sudo journalctl -u docker --no-pager --since '-15 min' 2>/dev/null \
               | grep -iE "host doesn't match|credential|authoriz" | tail -15 || true
             echo '```'
-          } | tee "$RUNNER_TEMP/verdict.md" >> "$GITHUB_STEP_SUMMARY"
+          } > "$RUNNER_TEMP/verdict.md"
+          cat "$RUNNER_TEMP/verdict.md"
+          cat "$RUNNER_TEMP/verdict.md" >> "$GITHUB_STEP_SUMMARY"
