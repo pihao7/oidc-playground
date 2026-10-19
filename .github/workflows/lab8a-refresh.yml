@@ -66,11 +66,16 @@ jobs:
           echo "docker push denied as expected (expired credential at the token service):"
           tail -2 "$RUNNER_TEMP/push-expired.log"
 
-      - name: Refresh — on the 401, re-run the helper's exchange (new GitHub OIDC -> new credential)
-        run: .github/scripts/nvcr_oidc_init exchange
-
-      - name: Swap the refreshed credential into the daemon env (drop-in + restart)
-        run: .github/scripts/lab8a_sim_registry.sh swap
+      - name: Refresh — on the 401: re-exchange + swap the new credential into the daemon env
+        run: |
+          set -euo pipefail
+          .github/scripts/nvcr_oidc_init exchange
+          # the exchange wrote the new token to $GITHUB_ENV (reaches later steps
+          # only) and $GITHUB_OUTPUT (usable here) — this step's env still holds
+          # the expired token, so hand the fresh one to the swap explicitly
+          new_token="$(sed -n 's/^token=//p' "$GITHUB_OUTPUT")"
+          test -n "$new_token"
+          NGC_OIDC_ACCESS_TOKEN="$new_token" .github/scripts/lab8a_sim_registry.sh swap
 
       - name: Docker op 1 retry — push with the refreshed credential (expect OK)
         id: push_ok
