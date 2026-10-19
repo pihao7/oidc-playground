@@ -32,6 +32,7 @@ jobs:
       TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
       IMAGE: nvcr.io/org-123/team-a/image:v1
       FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
+      DEMO_IMAGE_REF: hello-world@sha256:11a3eb1597e864c51b3f56733cb2e8a90bf0c284bfc05f9444d81c558bc848aa
     steps:
       - uses: actions/checkout@v4
 
@@ -55,8 +56,8 @@ jobs:
           print(f"credential validity left: {left}s")
           assert left > 5, "credential already expired — the setup steps ate the TTL"
           PY
-          docker pull -q hello-world:latest >/dev/null
-          docker tag hello-world:latest "$IMAGE"
+          docker pull -q "$DEMO_IMAGE_REF" >/dev/null
+          docker tag "$DEMO_IMAGE_REF" "$IMAGE"
           docker push "$IMAGE"
           docker rmi "$IMAGE" >/dev/null
           docker pull "$IMAGE"
