@@ -98,16 +98,20 @@ jobs:
           HTTPServer(("127.0.0.1", 5001), H).serve_forever()
           TSVC
           # 5. fake registry (:5000, HTTPS) — always answers with the 401 challenge
+          #    (HEAD too — the containerd resolver pings with HEAD, and an
+          #    unimplemented method 501s instead of challenging)
           cat > "$RUNNER_TEMP/fakereg.py" <<'FAKEREG'
           import ssl
           from http.server import HTTPServer, BaseHTTPRequestHandler
           class H(BaseHTTPRequestHandler):
-              def do_GET(self):
+              def challenge(self):
                   self.send_response(401)
                   self.send_header("WWW-Authenticate", 'Bearer realm="http://127.0.0.1:5001/auth",service="registry"')
                   self.send_header("Content-Length", "2")
                   self.end_headers()
                   self.wfile.write(b"{}")
+              do_GET = challenge
+              do_HEAD = challenge
               def log_message(self, *a): pass
           srv = HTTPServer(("127.0.0.1", 5000), H)
           ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -120,6 +124,27 @@ jobs:
           nohup python3 "$RUNNER_TEMP/fakereg.py" >/dev/null 2>&1 &
           sleep 1
           curl -sS -o /dev/null -w 'fake registry challenge: HTTP %{http_code}\n' https://envtest.invalid:5000/v2/
+
+      - name: Sanity — is the helper reachable and does the CLI see the config?
+        run: |
+          set -euo pipefail
+          echo "DOCKER_CONFIG=${DOCKER_CONFIG:-<unset>}"
+          echo "--- user config ($HOME/.docker/config.json):"
+          ls -la "$HOME/.docker/" 2>/dev/null || true
+          cat "$HOME/.docker/config.json" 2>/dev/null || echo "(missing)"
+          echo "--- root config (/root/.docker/config.json):"
+          sudo ls -la /root/.docker/ 2>/dev/null || true
+          sudo cat /root/.docker/config.json 2>/dev/null || echo "(missing)"
+          echo "--- direct helper invocation (runner user):"
+          : > /tmp/envtest-helper.log
+          printf 'envtest.invalid:5000' | docker-credential-envtest get; echo "rc=$?"
+          echo "--- helper log after direct call:"
+          cat /tmp/envtest-helper.log
+          echo "--- docker --debug pull (credential resolution lines):"
+          docker --debug pull envtest.invalid:5000/ns/img:1 2>&1 \
+            | grep -iE "credential|helper|auth" | head -10 || true
+          echo "--- helper log after debug pull:"
+          cat /tmp/envtest-helper.log
 
       - name: 'Probe — classic store (containerd-snapshotter: false)'
         run: |
