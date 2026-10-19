@@ -18,40 +18,31 @@
 #      stand-in) and sets rootcertbundle to that service's signing cert: the
 #      same trust shape a real registry has with its token service. The
 #      registry then enforces the tokens that service issues, itself.
-# So the client side (docker CLI + daemon + credential helper) runs unmodified
-# against a real registry implementation; the only POC piece behind the
-# challenge is the token service that redeems the exchanged credential.
 #
-# Subcommands:
-#   up     wire the credential helper into every docker resolution path (CLI env,
-#          daemon PATH, daemon config, daemon env via systemd drop-in), make the
-#          name nvcr.io resolve locally with genuinely trusted TLS, start
-#          registry:2 on :443 demanding token auth with its realm at the vm1
-#          token service (tunnel B), and wait for the 401 challenge
-#   swap   point the daemon's drop-in at the CURRENT NGC_OIDC_ACCESS_TOKEN and
-#          restart the daemon (live-restore keeps sim-nvcr up), then re-check
-#          the challenge — the refresh step's daemon half
+# Credential resolution is kept CLIENT-side on purpose: the docker CLI resolves
+# pull/push credentials itself and spawns the helper from the step's
+# environment — the helper is a client-side mechanism. The containerd image
+# store would move that resolution into the daemon (the helper then inherits
+# the DAEMON's environment — the failure this lab's earlier runs hit: the step
+# env had the token but the token service saw "no credential presented"), so
+# `up` pins the classic image store in daemon.json.
+#
+# Subcommand:
+#   up     pin the classic image store, make the name nvcr.io resolve locally
+#          with genuinely trusted TLS, start registry:2 on :443 demanding token
+#          auth with its realm at the vm1 token service (tunnel B), and wait
+#          for the 401 challenge
 #
 # Inputs (environment):
-#   NGC_OIDC_ACCESS_TOKEN  the exchanged credential (up: initial; swap: refreshed)
 #   TOKEN_SVC_URL          stage-2 token service base (tunnel B), no trailing slash
 #
-# Both subcommands are safe to re-run: `up` removes any previous sim-nvcr and
-# guards the /etc/hosts entry.
+# Safe to re-run: removes any previous sim-nvcr and guards the /etc/hosts entry.
 
 set -eu
 
 SIM_NAME="sim-nvcr"
-DROP_IN="/etc/systemd/system/docker.service.d/lab8a.conf"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-HELPER_SRC="$script_dir/nvcr_oidc_init"
 tls_dir="${RUNNER_TEMP:-/tmp}/lab8a-tls"
-
-write_drop_in() {
-    printf '[Service]\nEnvironment=NGC_OIDC_ACCESS_TOKEN=%s\n' "$NGC_OIDC_ACCESS_TOKEN" \
-        | sudo tee "$DROP_IN" >/dev/null
-    sudo chmod 600 "$DROP_IN"
-}
 
 wait_for_challenge() {
     for i in $(seq 1 30); do
@@ -64,21 +55,18 @@ wait_for_challenge() {
 
 do_up() {
     : "${TOKEN_SVC_URL:?TOKEN_SVC_URL is required (stage-2 token service base, tunnel B)}"
-    : "${NGC_OIDC_ACCESS_TOKEN:?NGC_OIDC_ACCESS_TOKEN is required (the exchanged credential)}"
 
-    # 1. the helper where every resolution path finds it: the daemon spawns the
-    #    helper from ITS environment and config, the CLI from its own (LAB8A §6)
-    sudo install -m 755 "$HELPER_SRC" /usr/local/bin/docker-credential-ngc
-    sudo mkdir -p /root/.docker
-    printf '{"credHelpers":{"nvcr.io":"ngc"}}\n' | sudo tee /root/.docker/config.json >/dev/null
-    sudo mkdir -p /etc/systemd/system/docker.service.d
-    write_drop_in
-    # live-restore: the refresh's `swap` restarts the daemon — sim-nvcr survives it
+    # 1. classic image store: pull/push credentials resolve CLI-side — the CLI
+    #    spawns the helper from the step's environment; no daemon env, no
+    #    drop-in, no daemon restart on refresh. (Merge, don't clobber: keep any
+    #    other feature flags the runner image set.)
     if [ -f /etc/docker/daemon.json ]; then
-        jq '. + {"live-restore": true}' /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json >/dev/null
+        jq '.features = ((.features // {}) + {"containerd-snapshotter": false})' \
+            /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json >/dev/null
     else
-        echo '{"live-restore": true}' | sudo tee /etc/docker/daemon.json >/dev/null
+        echo '{"features": {"containerd-snapshotter": false}}' | sudo tee /etc/docker/daemon.json >/dev/null
     fi
+    sudo systemctl restart docker
 
     # 2. the name nvcr.io means this box, and the TLS is genuinely trusted:
     #    a throwaway CA issues a server cert FOR the name nvcr.io, and the CA
@@ -96,8 +84,6 @@ do_up() {
         -out "$tls_dir/nvcr.io.crt" -extfile "$tls_dir/ext.cnf"
     sudo cp "$tls_dir/ca.crt" /usr/local/share/ca-certificates/lab8a-sim-ca.crt
     sudo update-ca-certificates
-    sudo systemctl daemon-reload
-    sudo systemctl restart docker
     grep -qE '^127\.0\.0\.1[[:space:]]+nvcr\.io$' /etc/hosts \
         || echo "127.0.0.1 nvcr.io" | sudo tee -a /etc/hosts
 
@@ -142,17 +128,7 @@ YAML
     curl -sSi https://nvcr.io/v2/ | grep -i www-authenticate
 }
 
-do_swap() {
-    : "${NGC_OIDC_ACCESS_TOKEN:?NGC_OIDC_ACCESS_TOKEN is required (the refreshed credential)}"
-    write_drop_in
-    sudo systemctl daemon-reload
-    sudo systemctl restart docker
-    wait_for_challenge
-    echo "daemon env swapped; sim registry still answering (challenge 401)"
-}
-
 case "${1:-}" in
     up) do_up ;;
-    swap) do_swap ;;
-    *) echo "usage: $0 [up|swap]" >&2; exit 1 ;;
+    *) echo "usage: $0 up" >&2; exit 1 ;;
 esac
