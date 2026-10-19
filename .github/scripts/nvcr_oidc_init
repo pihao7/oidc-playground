@@ -19,7 +19,7 @@
 #   NGC_CLI_API_KEY        long-lived API key (fallback)
 #
 # exchange/init inputs (environment):
-#   EXCHANGE_URL            token-exchange endpoint base (the service under test)
+#   EXCHANGE_URL       token-exchange endpoint base (the service under test)
 #   NGC_ORG            NGC organization (sent as both org_id and org_name —
 #                      same value; servers ignore unknown params)
 #   NGC_CONNECTION_ID  OIDC connection id
