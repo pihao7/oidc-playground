@@ -66,15 +66,23 @@ jobs:
           sudo chmod +x /usr/local/bin/docker-credential-envtest
 
           # 2. credHelpers for the test host — user side (CLI lookup) AND root
-          #    side (daemon lookup, in case the daemon resolves credentials itself)
-          for cfg in "$HOME/.docker/config.json" /root/.docker/config.json; do
-              sudo mkdir -p "$(dirname "$cfg")"
-              if sudo test -f "$cfg"; then
-                  sudo jq '.credHelpers += {"envtest.invalid:5000": "envtest"}' "$cfg" | sudo tee "$cfg" >/dev/null
-              else
-                  echo '{"credHelpers":{"envtest.invalid:5000":"envtest"}}' | sudo tee "$cfg" >/dev/null
-              fi
-          done
+          #    side (daemon lookup, in case the daemon resolves credentials itself).
+          #    NOTE: the runner pre-creates an EMPTY ~/.docker/config.json — an
+          #    empty file must take the create branch (jq on empty input silently
+          #    outputs nothing, which silently dropped the credHelpers once)
+          if [ -s "$HOME/.docker/config.json" ]; then
+              jq '.credHelpers += {"envtest.invalid:5000": "envtest"}' "$HOME/.docker/config.json" \
+                > "$RUNNER_TEMP/cfg.json" && mv "$RUNNER_TEMP/cfg.json" "$HOME/.docker/config.json"
+          else
+              printf '{"credHelpers":{"envtest.invalid:5000":"envtest"}}\n' > "$HOME/.docker/config.json"
+          fi
+          sudo mkdir -p /root/.docker
+          if sudo test -s /root/.docker/config.json; then
+              sudo jq '.credHelpers += {"envtest.invalid:5000": "envtest"}' /root/.docker/config.json \
+                | sudo tee /root/.docker/config.json >/dev/null
+          else
+              echo '{"credHelpers":{"envtest.invalid:5000":"envtest"}}' | sudo tee /root/.docker/config.json >/dev/null
+          fi
 
           # 3. the name resolves locally; TLS is genuinely trusted (self-signed
           #    cert FOR the name, in the system store — same trick as the lab)
