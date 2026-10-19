@@ -13,9 +13,13 @@ on:
         required: true
         default: 'org-123'
       connection_id:
-        description: 'OIDC connection id — this lab uses the 30s-TTL connection'
+        description: 'OIDC connection id — pair it with ttl_s (the lab waits ttl_s + 10s)'
         required: true
         default: 'conn-github-30s'
+      ttl_s:
+        description: 'Exchanged-credential TTL in seconds — must match the connection TTL'
+        required: false
+        default: '30'
       image_store:
         description: 'docker image store: classic (default) or containerd'
         required: false
@@ -28,11 +32,12 @@ permissions:
 jobs:
   refresh-demo:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       EXCHANGE_URL: ${{ inputs.exchange_url }}
       NGC_ORG: ${{ inputs.org_id }}
       NGC_CONNECTION_ID: ${{ inputs.connection_id }}
+      NGC_TTL_S: ${{ inputs.ttl_s }}
       TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
       LAB8A_IMAGE_STORE: ${{ inputs.image_store }}
       IMAGE: nvcr.io/${{ inputs.org_id }}/team-a/image:v1
@@ -77,11 +82,12 @@ jobs:
           echo "push + pull OK with the FRESH credential — the setup is sound;" \
             "the 401 below can only be the TTL" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Wait out the 30s credential TTL
+      - name: Wait out the credential TTL
         id: wait
         run: |
-          echo "credential TTL is 30s ($NGC_CONNECTION_ID); waiting 40s so docker op 1 starts expired"
-          sleep 40
+          wait_s=$((NGC_TTL_S + 10))
+          echo "credential TTL is ${NGC_TTL_S}s ($NGC_CONNECTION_ID); waiting ${wait_s}s so docker op 1 starts expired"
+          sleep "$wait_s"
           # symmetric guard: prove the credential really is expired, so the
           # auth failure below is the TTL and nothing else (e.g. a
           # longer-TTL connection passed in at dispatch)
@@ -91,7 +97,7 @@ jobs:
           seg += "=" * (-len(seg) % 4)
           left = json.loads(base64.urlsafe_b64decode(seg))["exp"] - int(time.time())
           print(f"credential validity left: {left}s")
-          assert left < 0, f"credential still valid ({left}s left) — {os.environ['NGC_CONNECTION_ID']} is not the 30s-TTL connection"
+          assert left < 0, f"credential still valid ({left}s left) — {os.environ['NGC_CONNECTION_ID']} is not the {os.environ['NGC_TTL_S']}s-TTL connection"
           PY
 
       - name: Docker op 1 — push on an expired credential (the wrap script refreshes + retries)
@@ -164,6 +170,6 @@ jobs:
             echo "Nothing is stored; every op resolves through the helper from the env."
             echo ""
             echo "### Audits (on vm1)"
-            echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=30s"
+            echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=${NGC_TTL_S}s"
             echo "- Token service (stage 2): \`~/nvcr-exchange/registry_token_audit.log\` — the 401 (ExpiredSignatureError) then the OKs"
           } >> "$GITHUB_STEP_SUMMARY"
