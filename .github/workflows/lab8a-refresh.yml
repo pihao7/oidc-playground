@@ -133,6 +133,7 @@ jobs:
           printf '%s' "$input" | "$0.real" "$@"
           SHIM
             sudo chmod 755 "$pair"
+          done
           # direct probe first: the token service's 401 for the expired credential,
           # verbatim — the smoking gun the docker push below hits through the daemon
           code="$(curl -sS -o "$RUNNER_TEMP/tsvc-probe.json" -w '%{http_code}' \
