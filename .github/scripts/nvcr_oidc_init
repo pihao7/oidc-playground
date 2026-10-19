@@ -80,10 +80,18 @@ do_exchange() {
         exit 1
     fi
 
-    id_token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+    resp=$(curl -sS -w '\n%{http_code}' -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
         "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}") \
         || { echo "::error::OIDC token request failed" >&2; exit 1; }
-    id_token=$(printf '%s' "$id_token" | jq -er .value) \
+    code=$(printf '%s' "$resp" | tail -n1)
+    body=$(printf '%s' "$resp" | sed '$d')
+    if [ "$code" != "200" ]; then
+        # error bodies carry no token material — show them; a 200 body could,
+        # so it stays hidden (only "no .value" is reported)
+        echo "::error::OIDC token request returned HTTP $code: $(printf '%s' "$body" | head -c 300)" >&2
+        exit 1
+    fi
+    id_token=$(printf '%s' "$body" | jq -er .value) \
         || { echo "::error::mint response had no .value" >&2; exit 1; }
     echo "::add-mask::$id_token"
     echo "minted ID token: ${#id_token} chars, aud=$OIDC_AUDIENCE"
