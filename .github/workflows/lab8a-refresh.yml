@@ -58,9 +58,9 @@ jobs:
           PY
           docker pull -q "$DEMO_IMAGE_REF" >/dev/null
           docker tag "$DEMO_IMAGE_REF" "$IMAGE"
-          nvcr_docker push "$IMAGE"
+          .github/scripts/nvcr_docker push "$IMAGE"
           docker rmi "$IMAGE" >/dev/null
-          nvcr_docker pull "$IMAGE"
+          .github/scripts/nvcr_docker pull "$IMAGE"
           echo "push + pull OK with the FRESH credential — the setup is sound;" \
             "the 401 below can only be the TTL" | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -80,7 +80,7 @@ jobs:
             -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" || true)"
           echo "direct token-service probe with the expired credential -> HTTP $code"
           cat "$RUNNER_TEMP/tsvc-probe.json"
-          nvcr_docker push "$IMAGE"
+          .github/scripts/nvcr_docker push "$IMAGE"
           echo "PUSH OK — the credential had expired; nvcr_docker refreshed + retried" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -89,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           docker rmi "$IMAGE" >/dev/null
-          nvcr_docker pull "$IMAGE"
+          .github/scripts/nvcr_docker pull "$IMAGE"
           echo "PULL OK — refreshed credential -> helper -> token service -> registry" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -97,7 +97,7 @@ jobs:
         id: foreign_probe
         run: |
           set -euo pipefail
-          if nvcr_docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
+          if .github/scripts/nvcr_docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
             echo "outcome=BREACHED" >> "$GITHUB_OUTPUT"
             echo "::error::FENCE FAILED: pull of ungranted repository succeeded"
             exit 1
@@ -132,7 +132,7 @@ jobs:
             echo "| Pull (op 2) | ${{ steps.pull_ok.outcome || 'skipped' }} |"
             echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} — held: the credential was still valid, so nvcr_docker did not refresh (a denial is not fixed by a new token) |"
             echo ""
-            echo "The workflow author only ever runs nvcr_docker push/pull — the expiry"
+            echo "The workflow author only ever runs .github/scripts/nvcr_docker push/pull — the expiry"
             echo "detection, re-mint + re-exchange, and retry are inside the wrap script."
             echo "Nothing is stored; every op resolves through the helper from the env."
             echo ""
