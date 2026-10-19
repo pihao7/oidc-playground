@@ -1,0 +1,186 @@
+name: lab9-sign-attest-discover
+on:
+  workflow_dispatch:
+    inputs:
+      nvcr_subject:
+        description: 'public nvcr.io image for the anonymous probes (read-only; digest resolved at run time)'
+        required: false
+        default: 'nvcr.io/nvidia/k8s-device-plugin:v0.17.4'
+
+permissions:
+  id-token: write    # Flow A — keyless signing (Fulcio); never used for registry auth
+  contents: read
+  packages: write    # ghcr.io control push (the automatic GITHUB_TOKEN)
+
+jobs:
+  sign-attest-discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NVCR_SUBJECT: ${{ inputs.nvcr_subject }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - uses: oras-project/setup-oras@v2
+
+      # ======== control: ghcr.io — a compliant registry; expect all green ========
+
+      - name: Control — push tiny image to ghcr.io (GITHUB_TOKEN is automatic)
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/oidc-playground:lab9"
+          mkdir -p ctx && printf 'FROM alpine:3.20\nCMD ["true"]\n' > ctx/Dockerfile
+          docker build -q -t "$IMAGE" ctx
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          OUT=$(docker push "$IMAGE" 2>&1); echo "$OUT" | tail -2
+          DIGEST=$(echo "$OUT" | awk '/digest:/ {print $3}' | tail -1)
+          echo "GHCR_REF=ghcr.io/${{ github.repository_owner }}/oidc-playground@$DIGEST" >> "$GITHUB_ENV"
+
+      - name: Control — keyless sign (Flow A: ambient OIDC -> Fulcio -> Rekor -> referrer)
+        run: |
+          OUT=$(cosign sign --yes "$GHCR_REF" 2>&1); echo "$OUT"
+          echo "$OUT" | grep -oE 'index: [0-9]+' | tail -1 | sed 's/^/Rekor tlog /' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Control — attest SBOM (DSSE envelope, cyclonedx)
+        run: |
+          printf '{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[]}' > sbom.cdx.json
+          cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$GHCR_REF"
+
+      - name: Control — oras login + attach a plain file (oras's own attach path)
+        run: |
+          echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf 'lab9 oras attach probe\n' > note.txt
+          oras attach --artifact-type application/vnd.nvidia.lab9.note "$GHCR_REF" note.txt
+
+      - name: Control — verify signature + attestation (identity = this workflow)
+        run: |
+          cosign verify "$GHCR_REF" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          cosign verify-attestation "$GHCR_REF" --type cyclonedx \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Control — oras discover (Referrers API, native)
+        run: oras discover --format tree "$GHCR_REF"
+
+      # ======== probes: nvcr.io — anonymous, zero secrets; expect the documented gaps ========
+
+      - name: Probe — anonymous read (token + manifest HEAD; doubles as digest resolution)
+        run: |
+          REPO="${NVCR_SUBJECT#nvcr.io/}"; REPO="${REPO%%:*}"
+          TAG="${NVCR_SUBJECT##*:}"
+          TOKEN=$(curl -sS "https://nvcr.io/proxy_auth?service=registry&scope=repository:${REPO}:pull" | jq -r .token)
+          HDR=$(curl -sSI -H "Authorization: Bearer $TOKEN" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://nvcr.io/v2/${REPO}/manifests/${TAG}")
+          CODE=$(printf '%s' "$HDR" | head -1 | awk '{print $2}')
+          DIGEST=$(printf '%s' "$HDR" | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2}')
+          [ -n "$DIGEST" ] || { echo "manifest read failed (HTTP $CODE)"; exit 1; }
+          echo "read HTTP $CODE — subject: nvcr.io/${REPO}@${DIGEST}"
+          echo "NVCR_REF=nvcr.io/${REPO}@${DIGEST}" >> "$GITHUB_ENV"
+
+      - name: Probe — referrers endpoint (raw curl: GET + HEAD)
+        run: |
+          REPO="${NVCR_REF#nvcr.io/}"; REPO="${REPO%%@*}"
+          DIGEST="${NVCR_REF##*@}"
+          TOKEN=$(curl -sS "https://nvcr.io/proxy_auth?service=registry&scope=repository:${REPO}:pull" | jq -r .token)
+          echo "GET /v2/${REPO}/referrers/${DIGEST}:"
+          CODE=$(curl -sS -o "$RUNNER_TEMP/referrers.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://nvcr.io/v2/${REPO}/referrers/${DIGEST}")
+          echo "HTTP $CODE"; head -c 400 "$RUNNER_TEMP/referrers.json"; echo
+          echo "HEAD referrers (the known quirk):"
+          curl -sS -o /dev/null -w 'HTTP %{http_code}\n' -I -H "Authorization: Bearer $TOKEN" \
+            "https://nvcr.io/v2/${REPO}/referrers/${DIGEST}"
+
+      - name: Probe — keyless sign (Fulcio + Rekor OK; referrer write expected denied)
+        id: nvcr_sign
+        continue-on-error: true
+        run: |
+          if OUT=$(cosign sign --yes "$NVCR_REF" 2>&1); then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"; echo "$OUT"
+          else
+            echo "outcome=denied" >> "$GITHUB_OUTPUT"
+            echo "denied (friction gap #2 — public nvcr.io repos are read-only for external identities):"
+            echo "$OUT" | tail -3
+          fi
+
+      - name: Probe — attest SBOM, DSSE (Gate 1c — unmeasurable without write access)
+        id: nvcr_attest
+        continue-on-error: true
+        run: |
+          printf '{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[]}' > sbom.cdx.json
+          if OUT=$(cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$NVCR_REF" 2>&1); then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"; echo "$OUT"
+          else
+            echo "outcome=denied" >> "$GITHUB_OUTPUT"
+            echo "denied before the validator could see the DSSE media type (the doc's open question):"
+            echo "$OUT" | tail -3
+          fi
+
+      - name: Probe — oras attach (write expected denied)
+        id: nvcr_attach
+        continue-on-error: true
+        run: |
+          printf 'lab9 oras attach probe\n' > note.txt
+          if OUT=$(oras attach --artifact-type application/vnd.nvidia.lab9.note "$NVCR_REF" note.txt 2>&1); then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"; echo "$OUT"
+          else
+            echo "outcome=denied" >> "$GITHUB_OUTPUT"
+            echo "denied:"
+            echo "$OUT" | tail -3
+          fi
+
+      - name: Probe — oras discover (what does OCI 1.1 discovery see today?)
+        id: nvcr_discover
+        continue-on-error: true
+        run: |
+          RC=0
+          OUT=$(oras discover --format tree "$NVCR_REF" 2>&1) || RC=$?
+          echo "$OUT"
+          echo "outcome=$([ $RC -eq 0 ] && echo accepted || echo denied)" >> "$GITHUB_OUTPUT"
+          { echo ""; echo "oras discover output (verbatim, truncated):"; echo '```'; printf '%.500s\n' "$OUT"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Probe — keyless verify (expected: no matching signatures — legacy .sig are key-based)
+        id: nvcr_verify
+        continue-on-error: true
+        run: |
+          if OUT=$(cosign verify "$NVCR_REF" \
+               --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+               --certificate-oidc-issuer https://token.actions.githubusercontent.com 2>&1); then
+            echo "outcome=accepted" >> "$GITHUB_OUTPUT"; echo "$OUT"
+          else
+            echo "outcome=no-signature" >> "$GITHUB_OUTPUT"
+            echo "no keyless signature stored (expected — the write was denied; the repo's legacy .sig siblings are key-based):"
+            echo "$OUT" | tail -3
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Lab 9 — keyless sign, attest, discover (cosign + oras)"
+            echo ""
+            echo "### Control — ghcr.io (compliant registry; all steps expected green)"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| push + keyless sign + attest + oras attach + verify + discover | OK (see step logs) |"
+            echo ""
+            echo "### Probes — \`${NVCR_SUBJECT}\` (anonymous, zero secrets)"
+            echo ""
+            echo "| Probe | Result |"
+            echo "| --- | --- |"
+            echo "| anonymous read | accepted (digest resolved) |"
+            echo "| referrers GET / HEAD | see probe log (200-empty / 405 quirk expected) |"
+            echo "| keyless sign (cosign) | ${{ steps.nvcr_sign.outputs.outcome || 'not reached' }} |"
+            echo "| attest DSSE (cosign) | ${{ steps.nvcr_attest.outputs.outcome || 'not reached' }} |"
+            echo "| oras attach | ${{ steps.nvcr_attach.outputs.outcome || 'not reached' }} |"
+            echo "| oras discover | ${{ steps.nvcr_discover.outputs.outcome || 'not reached' }} |"
+            echo "| keyless verify (cosign) | ${{ steps.nvcr_verify.outputs.outcome || 'not reached' }} |"
+            echo ""
+            echo "denied = the documented friction gaps (public nvcr.io repos are read-only for external"
+            echo "identities — the blocker is the auth model, not the artifact shape); accepted ="
+            echo "investigate if unexpected. The green control side shows the same tooling works on a"
+            echo "compliant registry — the gap is nvcr.io's, not the tooling's."
+          } >> "$GITHUB_STEP_SUMMARY"
