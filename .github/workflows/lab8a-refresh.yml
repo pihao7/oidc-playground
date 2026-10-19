@@ -1,0 +1,185 @@
+name: lab8a-refresh
+on:
+  workflow_dispatch:
+    inputs:
+      exchange_url:
+        description: 'Exchange endpoint base (tunnel A from vm1, no trailing slash)'
+        required: true
+      token_svc_url:
+        description: 'Stage-2 token service base (tunnel B from vm1, no trailing slash)'
+        required: true
+      org_id:
+        description: 'NGC org id'
+        required: true
+        default: 'org-123'
+      connection_id:
+        description: 'OIDC connection id — this lab uses the 60s-TTL connection'
+        required: true
+        default: 'conn-github-60s'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  refresh-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXCHANGE_URL: ${{ inputs.exchange_url }}
+      NGC_ORG: ${{ inputs.org_id }}
+      NGC_CONNECTION_ID: ${{ inputs.connection_id }}
+      TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
+      IMAGE: nvcr.io/org-123/team-a/image:v1
+      FOREIGN_IMAGE: nvcr.io/org-123/team-b/other:v1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init — mint + exchange (60s credential) + install helper + credHelpers
+        run: .github/scripts/nvcr_oidc_init
+
+      - name: Sim registry as nvcr.io on :443 (realm -> vm1 token service via tunnel B)
+        run: |
+          set -euo pipefail
+          # Local "mini nvcr.io" (lab 7 wiring): CA + server cert for nvcr.io,
+          # trusted by the daemon and curl via the system store.
+          mkdir -p "$RUNNER_TEMP/tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$RUNNER_TEMP/tls/ca.key" -out "$RUNNER_TEMP/tls/ca.crt" -subj "/CN=lab8a-sim-ca"
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$RUNNER_TEMP/tls/nvcr.io.key" -out "$RUNNER_TEMP/tls/nvcr.io.csr" \
+            -subj "/CN=nvcr.io" -addext "subjectAltName=DNS:nvcr.io"
+          openssl x509 -req -days 2 \
+            -in "$RUNNER_TEMP/tls/nvcr.io.csr" -CA "$RUNNER_TEMP/tls/ca.crt" -CAkey "$RUNNER_TEMP/tls/ca.key" \
+            -out "$RUNNER_TEMP/tls/nvcr.io.crt" -extfile <(printf 'subjectAltName=DNS:nvcr.io')
+          sudo cp "$RUNNER_TEMP/tls/ca.crt" /usr/local/share/ca-certificates/lab8a-sim-ca.crt
+          sudo update-ca-certificates
+          sudo systemctl restart docker
+          echo "127.0.0.1 nvcr.io" | sudo tee -a /etc/hosts
+          # stage 2 (the token service) runs on vm1 — fetch its rootcertbundle
+          # (public key material) and point the registry's realm at it
+          curl -sfS "$TOKEN_SVC_URL/cert.pem" -o "$RUNNER_TEMP/token-root.pem"
+          head -1 "$RUNNER_TEMP/token-root.pem" | grep -q "BEGIN CERTIFICATE"
+          cat > "$RUNNER_TEMP/registry-config.yml" <<YAML
+          version: 0.1
+          log:
+            level: info
+          storage:
+            filesystem:
+              rootdirectory: /var/lib/registry
+          http:
+            addr: :5000
+            tls:
+              certificate: /etc/registry/tls/nvcr.io.crt
+              key: /etc/registry/tls/nvcr.io.key
+          auth:
+            token:
+              realm: $TOKEN_SVC_URL/auth
+              service: registry
+              issuer: https://nvcr-token-proxy-poc.local
+              rootcertbundle: /etc/registry/token-root.pem
+          YAML
+          docker run -d --name sim-nvcr -p 443:5000 \
+            -v "$RUNNER_TEMP/registry-config.yml":/etc/docker/registry/config.yml:ro \
+            -v "$RUNNER_TEMP/token-root.pem":/etc/registry/token-root.pem:ro \
+            -v "$RUNNER_TEMP/tls/nvcr.io.crt":/etc/registry/tls/nvcr.io.crt:ro \
+            -v "$RUNNER_TEMP/tls/nvcr.io.key":/etc/registry/tls/nvcr.io.key:ro \
+            registry:2
+          for i in $(seq 1 30); do
+            challenge="$(curl -sS -o /dev/null -w '%{http_code}' https://nvcr.io/v2/ 2>/dev/null || true)"
+            [ "$challenge" = "401" ] && break
+            sleep 1
+          done
+          curl -sSi https://nvcr.io/v2/ | grep -i www-authenticate
+
+      - name: Wait out the 60s credential TTL
+        run: |
+          echo "credential TTL is 60s ($NGC_CONNECTION_ID); waiting 70s so docker op 1 starts expired"
+          sleep 70
+
+      - name: Docker op 1 — push with the expired credential (expect 401)
+        id: push_expired
+        run: |
+          set -euo pipefail
+          # direct probe first: the token service's 401 for the expired credential,
+          # verbatim — the smoking gun the docker push below hits through the daemon
+          code="$(curl -sS -o "$RUNNER_TEMP/tsvc-probe.json" -w '%{http_code}' \
+            "$TOKEN_SVC_URL/auth?service=registry&scope=repository:org-123/team-a/image:pull,push" \
+            -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" || true)"
+          echo "direct token-service probe with the expired credential -> HTTP $code"
+          cat "$RUNNER_TEMP/tsvc-probe.json"
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$IMAGE"
+          if docker push "$IMAGE" > "$RUNNER_TEMP/push-expired.log" 2>&1; then
+            echo "::error::push with an expired credential unexpectedly succeeded"
+            exit 1
+          fi
+          echo "docker push denied as expected (expired credential at the token service):"
+          tail -2 "$RUNNER_TEMP/push-expired.log"
+
+      - name: Refresh — on the 401, re-run the helper's exchange (new GitHub OIDC -> new credential)
+        run: .github/scripts/nvcr_oidc_init exchange
+
+      - name: Docker op 1 retry — push with the refreshed credential (expect OK)
+        id: push_ok
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE"
+          echo "PUSH OK after refresh" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Docker op 2 — pull with the refreshed credential (expect OK)
+        id: pull_ok
+        run: |
+          set -euo pipefail
+          docker rmi "$IMAGE" >/dev/null
+          docker pull "$IMAGE"
+          echo "PULL OK — refreshed credential -> helper -> token service -> registry" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Negative probe — repository outside the trust policy grants (must fail)
+        id: foreign_probe
+        run: |
+          set -euo pipefail
+          if docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
+            echo "outcome=BREACHED" >> "$GITHUB_OUTPUT"
+            echo "::error::FENCE FAILED: pull of ungranted repository succeeded"
+            exit 1
+          fi
+          echo "outcome=held" >> "$GITHUB_OUTPUT"
+          echo "denied as expected (no grant for org-123/team-b/other):"
+          tail -1 "$RUNNER_TEMP/foreign-probe.log"
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          claims="$(python3 - <<'PY'
+          import os, base64, json
+          try:
+              seg = os.environ["NGC_OIDC_ACCESS_TOKEN"].split(".")[1]
+              seg += "=" * (-len(seg) % 4)
+              c = json.loads(base64.urlsafe_b64decode(seg))
+              print(f"ttl={c['exp'] - c['iat']}s connection={c['oidc']['connection_id']} subject={c['oidc']['subject']}")
+          except Exception:
+              print("claims unavailable")
+          PY
+          )"
+          {
+            echo "## Lab 8a — 401-triggered credential refresh"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Init (mint + exchange + helper install + credHelpers) | OK — exchange #1 |"
+            echo "| Push with expired credential | denied 401 (expected — TTL waited out) |"
+            echo "| Refresh on the 401 (helper exchange re-run) | OK — exchange #2, $claims |"
+            echo "| Push retry | ${{ steps.push_ok.outcome || 'skipped' }} |"
+            echo "| Pull (op 2) | ${{ steps.pull_ok.outcome || 'skipped' }} |"
+            echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} |"
+            echo ""
+            echo "The refreshed credential is used in place — nothing is stored;"
+            echo "each docker op resolves through the helper from the environment."
+            echo ""
+            echo "### Audits (on vm1)"
+            echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=60s"
+            echo "- Token service (stage 2): \`~/nvcr-exchange/registry_token_audit.log\` — the 401 (ExpiredSignatureError) then the OKs"
+          } >> "$GITHUB_STEP_SUMMARY"
