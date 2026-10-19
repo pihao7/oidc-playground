@@ -16,6 +16,10 @@ on:
         description: 'OIDC connection id — this lab uses the 30s-TTL connection'
         required: true
         default: 'conn-github-30s'
+      image_store:
+        description: 'docker image store: classic (default) or containerd'
+        required: false
+        default: 'classic'
 
 permissions:
   id-token: write
@@ -30,6 +34,7 @@ jobs:
       NGC_ORG: ${{ inputs.org_id }}
       NGC_CONNECTION_ID: ${{ inputs.connection_id }}
       TOKEN_SVC_URL: ${{ inputs.token_svc_url }}
+      LAB8A_IMAGE_STORE: ${{ inputs.image_store }}
       IMAGE: nvcr.io/${{ inputs.org_id }}/team-a/image:v1
       FOREIGN_IMAGE: nvcr.io/${{ inputs.org_id }}/team-b/other:v1
       DEMO_IMAGE_REF: hello-world@sha256:11a3eb1597e864c51b3f56733cb2e8a90bf0c284bfc05f9444d81c558bc848aa
@@ -38,7 +43,7 @@ jobs:
 
       # everything slow happens BEFORE the exchange — the 30s clock starts in
       # the init step, so registry bring-up and the demo pull can't eat the TTL
-      - name: Classic image store + TLS trust + sim registry as nvcr.io on :443
+      - name: 'Image store (${{ inputs.image_store }}) + TLS trust + sim registry as nvcr.io on :443'
         id: sim
         run: .github/scripts/lab8a_sim_registry.sh up
 

@@ -19,19 +19,23 @@
 #      same trust shape a real registry has with its token service. The
 #      registry then enforces the tokens that service issues, itself.
 #
-# Credential resolution is kept CLIENT-side on purpose: the docker CLI resolves
-# pull/push credentials itself and spawns the helper from the step's
-# environment — the helper is a client-side mechanism. The containerd image
-# store would move that resolution into the daemon (the helper then inherits
-# the DAEMON's environment — the failure this lab's earlier runs hit: the step
-# env had the token but the token service saw "no credential presented"), so
-# `up` pins the classic image store in daemon.json.
+# Credential resolution stays CLIENT-side: the docker CLI resolves pull/push
+# credentials itself and spawns the helper from the step's environment — the
+# helper is a client-side mechanism, and the refresh flow (nvcr_docker swapping
+# NGC_OIDC_ACCESS_TOKEN in the step env, retried op included) depends on it.
+# VERIFIED on runner docker 28.0.4 (the lab8a-debug-store workflow): the CLI
+# spawns the helper and the credential reaches the token service under BOTH
+# image stores, so the earlier "daemon env inheritance" theory does not hold
+# for this version. The classic store stays the default — conservative, and it
+# sidesteps containerd-store differences (e.g. it ignores insecure-registries);
+# set LAB8A_IMAGE_STORE=containerd to run the lab on the containerd store.
 #
 # Subcommand:
-#   up     pin the classic image store, make the name nvcr.io resolve locally
-#          with genuinely trusted TLS, start registry:2 on :443 demanding token
-#          auth with its realm at the vm1 token service (tunnel B), and wait
-#          for the 401 challenge
+#   up     set the image store (LAB8A_IMAGE_STORE, classic|containerd, default
+#          classic), make the name nvcr.io resolve locally with genuinely
+#          trusted TLS, start registry:2 on :443 demanding token auth with its
+#          realm at the vm1 token service (tunnel B), and wait for the 401
+#          challenge
 #
 # Inputs (environment):
 #   TOKEN_SVC_URL          stage-2 token service base (tunnel B), no trailing slash
@@ -57,15 +61,21 @@ do_up() {
     : "${TOKEN_SVC_URL:?TOKEN_SVC_URL is required (stage-2 token service base, tunnel B)}"
     TOKEN_SVC_URL="${TOKEN_SVC_URL%/}"
 
-    # 1. classic image store: pull/push credentials resolve CLI-side — the CLI
-    #    spawns the helper from the step's environment; no daemon env, no
-    #    drop-in, no daemon restart on refresh. (Merge, don't clobber: keep any
-    #    other feature flags the runner image set.)
+    # 1. image store: classic by default (LAB8A_IMAGE_STORE=containerd opts in
+    #    to the containerd store) — see the header note on credential
+    #    resolution. (Merge, don't clobber: keep any other feature flags the
+    #    runner image set.)
+    image_store="${LAB8A_IMAGE_STORE:-classic}"
+    case "$image_store" in
+        classic)    snapshotter=false ;;
+        containerd) snapshotter=true ;;
+        *) echo "LAB8A_IMAGE_STORE must be 'classic' or 'containerd'" >&2; exit 2 ;;
+    esac
     if [ -f /etc/docker/daemon.json ]; then
-        jq '.features = ((.features // {}) + {"containerd-snapshotter": false})' \
+        jq --argjson v "$snapshotter" '.features = ((.features // {}) + {"containerd-snapshotter": $v})' \
             /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json >/dev/null
     else
-        echo '{"features": {"containerd-snapshotter": false}}' | sudo tee /etc/docker/daemon.json >/dev/null
+        printf '{"features": {"containerd-snapshotter": %s}}\n' "$snapshotter" | sudo tee /etc/docker/daemon.json >/dev/null
     fi
     sudo systemctl restart docker
 
