@@ -54,9 +54,9 @@ jobs:
           NGC_OIDC_ACCESS_TOKEN: ${{ steps.nvcr.outputs.token }}
         run: |
           set -euo pipefail
-          # The helper binary is served
-          # through the tunnel behind a valid exchanged credential — the binary
-          # never travels through GitHub.
+          # The helper binary is served by the exchange server through the
+          # tunnel, gated on a valid exchanged credential — the binary never
+          # travels through this public repo.
           curl -sfS -H "Authorization: Bearer $NGC_OIDC_ACCESS_TOKEN" \
             "$EXCHANGE_URL/artifacts/docker-credential-ngc-linux-amd64" \
             -o /usr/local/bin/docker-credential-ngc

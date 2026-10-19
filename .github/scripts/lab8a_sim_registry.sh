@@ -3,8 +3,8 @@
 # LOCAL registry on the runner, with no special flags.
 #
 # The registry is NOT simulated — it is the real Docker registry: registry:2 is
-# docker/distribution, the standard registry implementation.
-# the /v2/ API, the 401 challenge, the bearer-token
+# docker/distribution, the standard registry implementation. The /v2/ API, the
+# 401 challenge, the bearer-token
 # enforcement, manifests and blobs are all the real thing. What stands in for
 # the real nvcr.io service is only WHERE it lives and WHO vouches for
 # credentials, and each substitution is a config-level trick:
@@ -14,10 +14,10 @@
 #      the CA goes into the system trust store, so the daemon's and curl's real
 #      certificate verification passes (no --insecure anywhere)
 #   3. the AUTH — the registry's token-auth config (auth.token) points its
-#      realm at the vm1 token service (stage 2, the auth-endpoint stand-in) and
-#      sets rootcertbundle to that service's signing cert: exactly the trust
-#      shape the real registry has with the real token service. The registry
-#      then enforces the tokens that service issues, itself.
+#      realm at the vm1 token service (stage 2, the registry's auth-endpoint
+#      stand-in) and sets rootcertbundle to that service's signing cert: the
+#      same trust shape a real registry has with its token service. The
+#      registry then enforces the tokens that service issues, itself.
 # So the client side (docker CLI + daemon + credential helper) runs unmodified
 # against a real registry implementation; the only POC piece behind the
 # challenge is the token service that redeems the exchanged credential.
@@ -103,7 +103,7 @@ do_up() {
 
     # 3. the REAL Docker registry (registry:2 = docker/distribution), published
     #    on :443 and configured for token auth: the challenge's realm points at
-    #    the vm1 token service (tunnel B) — the auth-endpoint stand-in — and
+    #    the vm1 token service (tunnel B) — the auth endpoint stand-in — and
     #    rootcertbundle tells the registry which signer's bearer tokens to
     #    accept (that service's cert, fetched from its /cert.pem). The registry
     #    then enforces those tokens itself; nothing here patches the registry.

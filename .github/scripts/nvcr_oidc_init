@@ -19,9 +19,9 @@
 #   NGC_CLI_API_KEY        long-lived API key (fallback)
 #
 # exchange/init inputs (environment):
-#   EXCHANGE_URL            token-exchange endpoint base, e.g. https://exchange.example.com
-#   NGC_ORG            NGC organization (sent as both org_id — deployed POC server —
-#                      and org_name; same value, servers ignore unknown params)
+#   EXCHANGE_URL            token-exchange endpoint base (the service under test)
+#   NGC_ORG            NGC organization (sent as both org_id and org_name —
+#                      same value; servers ignore unknown params)
 #   NGC_CONNECTION_ID  OIDC connection id
 #   OIDC_AUDIENCE      audience minted into the ID token (default nvcr.io);
 #                      must be listed in connection.subject_audiences
