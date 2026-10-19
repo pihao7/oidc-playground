@@ -58,9 +58,9 @@ jobs:
           PY
           docker pull -q "$DEMO_IMAGE_REF" >/dev/null
           docker tag "$DEMO_IMAGE_REF" "$IMAGE"
-          docker push "$IMAGE"
+          nvcr_docker push "$IMAGE"
           docker rmi "$IMAGE" >/dev/null
-          docker pull "$IMAGE"
+          nvcr_docker pull "$IMAGE"
           echo "push + pull OK with the FRESH credential — the setup is sound;" \
             "the 401 below can only be the TTL" | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -69,40 +69,27 @@ jobs:
           echo "credential TTL is 30s ($NGC_CONNECTION_ID); waiting 40s so docker op 1 starts expired"
           sleep 40
 
-      - name: Docker op 1 — push with the expired credential (expect 401)
-        id: push_expired
+      - name: Docker op 1 — push on an expired credential (the wrap script refreshes + retries)
+        id: push_ok
         run: |
           set -euo pipefail
           # direct probe first: the token service's 401 for the expired credential,
-          # verbatim — the smoking gun the docker push below hits through the daemon
+          # verbatim — what the wrapped push below will hit and recover from
           code="$(curl -sS -o "$RUNNER_TEMP/tsvc-probe.json" -w '%{http_code}' \
             "$TOKEN_SVC_URL/auth?service=registry&scope=repository:org-123/team-a/image:pull,push" \
             -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" || true)"
           echo "direct token-service probe with the expired credential -> HTTP $code"
           cat "$RUNNER_TEMP/tsvc-probe.json"
-          if docker push "$IMAGE" > "$RUNNER_TEMP/push-expired.log" 2>&1; then
-            echo "::error::push with an expired credential unexpectedly succeeded"
-            exit 1
-          fi
-          echo "docker push denied as expected (expired credential at the token service):"
-          tail -2 "$RUNNER_TEMP/push-expired.log"
-
-      - name: Refresh — on the 401, re-exchange (new GitHub OIDC -> new credential)
-        run: .github/scripts/nvcr_oidc_init exchange
-
-      - name: Docker op 1 retry — push with the refreshed credential (expect OK)
-        id: push_ok
-        run: |
-          set -euo pipefail
-          docker push "$IMAGE"
-          echo "PUSH OK after refresh" | tee -a "$GITHUB_STEP_SUMMARY"
+          nvcr_docker push "$IMAGE"
+          echo "PUSH OK — the credential had expired; nvcr_docker refreshed + retried" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Docker op 2 — pull with the refreshed credential (expect OK)
         id: pull_ok
         run: |
           set -euo pipefail
           docker rmi "$IMAGE" >/dev/null
-          docker pull "$IMAGE"
+          nvcr_docker pull "$IMAGE"
           echo "PULL OK — refreshed credential -> helper -> token service -> registry" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -110,7 +97,7 @@ jobs:
         id: foreign_probe
         run: |
           set -euo pipefail
-          if docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
+          if nvcr_docker pull "$FOREIGN_IMAGE" > "$RUNNER_TEMP/foreign-probe.log" 2>&1; then
             echo "outcome=BREACHED" >> "$GITHUB_OUTPUT"
             echo "::error::FENCE FAILED: pull of ungranted repository succeeded"
             exit 1
@@ -140,14 +127,14 @@ jobs:
             echo "| Step | Result |"
             echo "| --- | --- |"
             echo "| Init (mint + exchange + helper install + credHelpers) | OK — exchange #1 |"
-            echo "| Push with expired credential | denied 401 (expected — TTL waited out) |"
-            echo "| Refresh on the 401 (helper exchange re-run) | OK — exchange #2, $claims |"
-            echo "| Push retry | ${{ steps.push_ok.outcome || 'skipped' }} |"
+            echo "| Fresh push + pull (before the wait) | OK — the setup is sound |"
+            echo "| Push on the expired credential | OK — nvcr_docker detected the expiry, refreshed (exchange #2, $claims), retried |"
             echo "| Pull (op 2) | ${{ steps.pull_ok.outcome || 'skipped' }} |"
-            echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} |"
+            echo "| Ungranted repo | ${{ steps.foreign_probe.outputs.outcome || 'not reached' }} — held: the credential was still valid, so nvcr_docker did not refresh (a denial is not fixed by a new token) |"
             echo ""
-            echo "The refreshed credential is used in place — nothing is stored;"
-            echo "each docker op resolves through the helper (CLI env + daemon drop-in)."
+            echo "The workflow author only ever runs nvcr_docker push/pull — the expiry"
+            echo "detection, re-mint + re-exchange, and retry are inside the wrap script."
+            echo "Nothing is stored; every op resolves through the helper from the env."
             echo ""
             echo "### Audits (on vm1)"
             echo "- Exchange (stage 1): \`~/nvcr-exchange/exchange_audit.log\` — two OK exchanges, ttl=30s"

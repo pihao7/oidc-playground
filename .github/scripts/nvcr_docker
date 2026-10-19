@@ -1,0 +1,131 @@
+#!/bin/sh
+# nvcr_docker — docker push/pull with the credential handled: if the registry
+# rejects the op because the exchanged credential expired, re-mint + re-exchange
+# and retry — the caller just runs the op and sees it succeed.
+#
+#   nvcr_docker push  IMAGE [docker-args...]   # wrapped: auth-failure retry
+#   nvcr_docker pull  IMAGE [docker-args...]   # wrapped: auth-failure retry
+#   nvcr_docker <anything else> [args...]      # passthrough to docker, no retry
+#
+# Why not refresh on every 401: an auth failure with a STILL-VALID credential is
+# an authorization denial (no grant for that repository) — a new token cannot
+# fix it and refreshing must not mask it. So the refresh is gated on the
+# credential's own expiry: decode exp from $NGC_OIDC_ACCESS_TOKEN and refresh
+# only when it is expired or within NGC_REFRESH_MARGIN_S (default 5s) of
+# expiring. One refresh per op — a retry that fails again fails through.
+#
+# The refreshed token reaches the retried op through this process's
+# environment; in Actions the exchange also writes $GITHUB_ENV, so later steps
+# (and their ops) see it too. Nothing is stored.
+#
+# Inputs (environment): nvcr_oidc_init exchange's inputs (EXCHANGE_URL,
+# NGC_ORG, NGC_CONNECTION_ID, ACTIONS_ID_TOKEN_REQUEST_*) plus
+# NGC_OIDC_ACCESS_TOKEN — the current credential; when unset (API-key fallback
+# mode) there is nothing to refresh and auth failures fail through.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MARGIN_S="${NGC_REFRESH_MARGIN_S:-5}"
+
+is_auth_failure() {
+    printf '%s' "$1" | grep -qiE 'unauthorized|authentication required'
+}
+
+# seconds left on the exchanged credential; -1 when unset or not a decodable JWT
+validity_left() {
+    if [ -z "${NGC_OIDC_ACCESS_TOKEN:-}" ]; then
+        printf '%s\n' -1
+        return
+    fi
+    python3 - "$NGC_OIDC_ACCESS_TOKEN" <<'PY' 2>/dev/null || printf '%s\n' -1
+import sys, base64, json, time
+try:
+    seg = sys.argv[1].split(".")[1]
+    seg += "=" * (-len(seg) % 4)
+    print(int(json.loads(base64.urlsafe_b64decode(seg))["exp"]) - int(time.time()))
+except Exception:
+    print(-1)
+PY
+}
+
+refresh() {
+    # GITHUB_OUTPUT pointed at a temp file makes the exchange's token
+    # machine-readable here, in or out of Actions; its $GITHUB_ENV write
+    # (when in Actions) is untouched, so later steps see the new token too
+    tmp_out=$(mktemp)
+    GITHUB_OUTPUT="$tmp_out" "$script_dir/nvcr_oidc_init" exchange
+    token=$(sed -n 's/^token=//p' "$tmp_out")
+    rm -f "$tmp_out"
+    if [ -z "$token" ]; then
+        echo "refresh produced no token" >&2
+        return 1
+    fi
+    export NGC_OIDC_ACCESS_TOKEN="$token"
+}
+
+run_wrapped() {
+    log=$(mktemp)
+    if docker "$@" > "$log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    if [ "$status" = "0" ]; then
+        cat "$log"
+        rm -f "$log"
+        return 0
+    fi
+    output=$(cat "$log")
+    rm -f "$log"
+    if ! is_auth_failure "$output"; then
+        printf '%s\n' "$output" >&2
+        return "$status"
+    fi
+    left=$(validity_left)
+    if [ "$left" -lt 0 ] || [ "$left" -ge "$MARGIN_S" ]; then
+        echo "auth failure with a still-valid credential (${left}s left) — not refreshing;" \
+            "an authorization denial is not fixed by a new token" >&2
+        printf '%s\n' "$output" >&2
+        return "$status"
+    fi
+    echo "auth failure with an expired credential (expired ${left}s ago) — refreshing + retrying" >&2
+    if ! refresh; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    log=$(mktemp)
+    if docker "$@" > "$log" 2>&1; then
+        cat "$log"
+        rm -f "$log"
+        return 0
+    fi
+    status=$?
+    cat "$log" >&2
+    rm -f "$log"
+    return "$status"
+}
+
+op="${1:-}"
+case "$op" in
+    push|pull)
+        shift
+        if [ $# -lt 1 ]; then
+            echo "usage: nvcr_docker $op IMAGE [docker-args...]" >&2
+            exit 2
+        fi
+        run_wrapped "$@"
+        ;;
+    help|--help|-h)
+        echo "usage: nvcr_docker push|pull IMAGE [docker-args...]" >&2
+        echo "       any other command passes through to docker unchanged" >&2
+        ;;
+    "")
+        echo "usage: nvcr_docker push|pull IMAGE [docker-args...]" >&2
+        echo "       any other command passes through to docker unchanged" >&2
+        exit 2
+        ;;
+    *)
+        exec docker "$@"
+        ;;
+esac
