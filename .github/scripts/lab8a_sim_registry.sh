@@ -1,6 +1,26 @@
 #!/bin/sh
-# lab8a_sim_registry.sh — the mini-nvcr.io: make plain `docker push nvcr.io/...`
-# work against a local fake registry on the runner, with no special flags.
+# lab8a_sim_registry.sh — make plain `docker push nvcr.io/...` work against a
+# LOCAL registry on the runner, with no special flags.
+#
+# The registry is NOT simulated — it is the real Docker registry: registry:2 is
+# docker/distribution, the standard registry implementation.
+# the /v2/ API, the 401 challenge, the bearer-token
+# enforcement, manifests and blobs are all the real thing. What stands in for
+# the real nvcr.io service is only WHERE it lives and WHO vouches for
+# credentials, and each substitution is a config-level trick:
+#   1. the NAME — /etc/hosts maps nvcr.io -> 127.0.0.1, so the real registry
+#      answers at the real hostname; docker's config needs no exceptions
+#   2. the TLS — a throwaway CA signs a server cert FOR the name nvcr.io and
+#      the CA goes into the system trust store, so the daemon's and curl's real
+#      certificate verification passes (no --insecure anywhere)
+#   3. the AUTH — the registry's token-auth config (auth.token) points its
+#      realm at the vm1 token service (stage 2, the auth-endpoint stand-in) and
+#      sets rootcertbundle to that service's signing cert: exactly the trust
+#      shape the real registry has with the real token service. The registry
+#      then enforces the tokens that service issues, itself.
+# So the client side (docker CLI + daemon + credential helper) runs unmodified
+# against a real registry implementation; the only POC piece behind the
+# challenge is the token service that redeems the exchanged credential.
 #
 # Subcommands:
 #   up     wire the credential helper into every docker resolution path (CLI env,
@@ -60,7 +80,10 @@ do_up() {
         echo '{"live-restore": true}' | sudo tee /etc/docker/daemon.json >/dev/null
     fi
 
-    # 2. the name nvcr.io means this box, with genuinely trusted TLS (no --insecure)
+    # 2. the name nvcr.io means this box, and the TLS is genuinely trusted:
+    #    a throwaway CA issues a server cert FOR the name nvcr.io, and the CA
+    #    installed into the system store makes the daemon's and curl's real
+    #    certificate verification pass against the local registry (no --insecure)
     mkdir -p "$tls_dir"
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
         -keyout "$tls_dir/ca.key" -out "$tls_dir/ca.crt" -subj "/CN=lab8a-sim-ca"
@@ -78,8 +101,12 @@ do_up() {
     grep -qE '^127\.0\.0\.1[[:space:]]+nvcr\.io$' /etc/hosts \
         || echo "127.0.0.1 nvcr.io" | sudo tee -a /etc/hosts
 
-    # 3. the fake registry: token auth, realm at the vm1 token service (tunnel B),
-    #    trusting that service's signing cert — the real registry's trust shape
+    # 3. the REAL Docker registry (registry:2 = docker/distribution), published
+    #    on :443 and configured for token auth: the challenge's realm points at
+    #    the vm1 token service (tunnel B) — the auth-endpoint stand-in — and
+    #    rootcertbundle tells the registry which signer's bearer tokens to
+    #    accept (that service's cert, fetched from its /cert.pem). The registry
+    #    then enforces those tokens itself; nothing here patches the registry.
     docker rm -f "$SIM_NAME" >/dev/null 2>&1 || true
     curl -sfS "$TOKEN_SVC_URL/cert.pem" -o "$tls_dir/token-root.pem"
     head -1 "$tls_dir/token-root.pem" | grep -q "BEGIN CERTIFICATE"
@@ -109,7 +136,8 @@ YAML
         -v "$tls_dir/nvcr.io.key":/etc/registry/tls/nvcr.io.key:ro \
         registry:2
 
-    # 4. readiness: answering as a private registry (401 + WWW-Authenticate)
+    # 4. readiness: the registry's OWN 401 + WWW-Authenticate challenge — the
+    #    normal "tell me who you are" of a private registry, nothing mocked
     wait_for_challenge
     curl -sSi https://nvcr.io/v2/ | grep -i www-authenticate
 }
