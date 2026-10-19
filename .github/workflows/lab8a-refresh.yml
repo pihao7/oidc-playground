@@ -41,6 +41,28 @@ jobs:
       - name: Classic image store + TLS trust + sim registry as nvcr.io on :443
         run: .github/scripts/lab8a_sim_registry.sh up
 
+      - name: Docker ops with the FRESH credential — push + pull (expect OK)
+        id: fresh_ops
+        run: |
+          set -euo pipefail
+          # guard: the fresh phase must run inside the credential's TTL — fail
+          # loudly here rather than with a confusing 401 below if setup ate it
+          python3 - <<'PY'
+          import os, base64, json, time
+          seg = os.environ["NGC_OIDC_ACCESS_TOKEN"].split(".")[1]
+          seg += "=" * (-len(seg) % 4)
+          left = json.loads(base64.urlsafe_b64decode(seg))["exp"] - int(time.time())
+          print(f"credential validity left: {left}s")
+          assert left > 5, "credential already expired — the setup steps ate the TTL"
+          PY
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$IMAGE"
+          docker push "$IMAGE"
+          docker rmi "$IMAGE" >/dev/null
+          docker pull "$IMAGE"
+          echo "push + pull OK with the FRESH credential — the setup is sound;" \
+            "the 401 below can only be the TTL" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Wait out the 30s credential TTL
         run: |
           echo "credential TTL is 30s ($NGC_CONNECTION_ID); waiting 40s so docker op 1 starts expired"
@@ -57,8 +79,6 @@ jobs:
             -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" || true)"
           echo "direct token-service probe with the expired credential -> HTTP $code"
           cat "$RUNNER_TEMP/tsvc-probe.json"
-          docker pull -q alpine:3.20 >/dev/null
-          docker tag alpine:3.20 "$IMAGE"
           if docker push "$IMAGE" > "$RUNNER_TEMP/push-expired.log" 2>&1; then
             echo "::error::push with an expired credential unexpectedly succeeded"
             exit 1
