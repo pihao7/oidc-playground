@@ -23,12 +23,10 @@
 # credentials itself and spawns the helper from the step's environment — the
 # helper is a client-side mechanism, and the refresh flow (nvcr_docker swapping
 # NGC_OIDC_ACCESS_TOKEN in the step env, retried op included) depends on it.
-# VERIFIED on runner docker 28.0.4 (the lab8a-debug-store workflow): the CLI
-# spawns the helper and the credential reaches the token service under BOTH
-# image stores, so the earlier "daemon env inheritance" theory does not hold
-# for this version. The classic store stays the default — conservative, and it
-# sidesteps containerd-store differences (e.g. it ignores insecure-registries);
-# set LAB8A_IMAGE_STORE=containerd to run the lab on the containerd store.
+# Verified on runner docker 28.0.4: this holds under both image stores, so the
+# classic store is a conservative default, not a requirement — it also
+# sidesteps containerd-store differences (e.g. it ignores insecure-registries).
+# Set LAB8A_IMAGE_STORE=containerd to run the lab on the containerd store.
 #
 # Subcommand:
 #   up     set the image store (LAB8A_IMAGE_STORE, classic|containerd, default
