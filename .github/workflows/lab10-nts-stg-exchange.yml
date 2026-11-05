@@ -25,15 +25,15 @@ on:
       registry:
         description: 'container registry for the redemption probes'
         required: true
-        default: 'registry.stg.ngc.nvidia.com'
+        default: 'stg.nvcr.io'
       allow_image:
         description: 'image the trust policy authorizes (pull should succeed)'
         required: true
-        default: 'nvidia/rsalagame:hello-world'
+        default: 'nvidia/rsalagame:helloworld'
       deny_image:
         description: 'image outside the policy (pull should be denied)'
         required: true
-        default: 'nvidia/xgboost_test:test'
+        default: 'nvidia/node:0.1'
 
 permissions:
   id-token: write
