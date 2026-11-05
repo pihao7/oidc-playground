@@ -74,6 +74,8 @@ jobs:
           echo "::add-mask::$ID_TOKEN"
           echo "ID_TOKEN=$ID_TOKEN" >> "$GITHUB_ENV"
           echo "minted ID token: ${#ID_TOKEN} chars, aud=$OIDC_AUDIENCE"
+          printf '%s' "$ID_TOKEN" | cut -d. -f2 | tr '_-' '/+' | awk '{l=length($0)%4; printf "%s%*s", $0, (l?4-l:0), ""}' | base64 -d 2>/dev/null \
+            | jq '{sub, aud, repository, ref, run_id, actor}' || echo "(payload decode failed)"
 
       - name: Exchange at NTS stg (positive)
         id: exchange
