@@ -1,0 +1,268 @@
+name: lab10-nts-stg-exchange
+on:
+  workflow_dispatch:
+    inputs:
+      exchange_url:
+        description: 'NTS/STS base URL (no trailing slash)'
+        required: true
+        default: 'https://stg.sts.api.nvidia.com'
+      ngc_org:
+        description: 'NGC org that owns the connection'
+        required: true
+        default: 'nvidia'
+      connection_id:
+        description: 'OIDC connection UUID (ngc_oidc_connection_id = <org>/<id>)'
+        required: true
+        default: 'edd7daec-35ac-404a-8e72-7731d3dbe19e'
+      subject_audience:
+        description: 'aud minted into the GitHub OIDC token (must be in connection.subject_audiences)'
+        required: true
+        default: 'sts.api.nvidia.com'
+      audience:
+        description: 'exchange audience form parameter (the NGC product)'
+        required: true
+        default: 'private-registry'
+      registry:
+        description: 'container registry for the redemption probes'
+        required: true
+        default: 'registry.stg.ngc.nvidia.com'
+      allow_image:
+        description: 'image the trust policy authorizes (pull should succeed)'
+        required: true
+        default: 'nvidia/rsalagame:hello-world'
+      deny_image:
+        description: 'image outside the policy (pull should be denied)'
+        required: true
+        default: 'nvidia/xgboost_test:test'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  exchange:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXCHANGE_URL: ${{ inputs.exchange_url }}
+      NGC_ORG: ${{ inputs.ngc_org }}
+      NGC_CONNECTION_ID: ${{ inputs.connection_id }}
+      OIDC_AUDIENCE: ${{ inputs.subject_audience }}
+      EXCHANGE_AUDIENCE: ${{ inputs.audience }}
+      REGISTRY: ${{ inputs.registry }}
+      ALLOW_IMAGE: ${{ inputs.allow_image }}
+      DENY_IMAGE: ${{ inputs.deny_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint GitHub OIDC token
+        run: |
+          set -eu
+          code=""; body=""
+          for attempt in 1 2 3; do
+            resp=$(curl -sS -w '\n%{http_code}' \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}") \
+              || { echo "::warning::mint request failed (attempt $attempt)"; sleep 5; continue; }
+            code=$(printf '%s' "$resp" | tail -n1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            [ "$code" = "200" ] && break
+            echo "::warning::mint returned HTTP $code (attempt $attempt)"; sleep 5
+          done
+          [ "$code" = "200" ] || { echo "::error::mint failed after 3 attempts (HTTP $code)"; exit 1; }
+          ID_TOKEN=$(printf '%s' "$body" | jq -er .value)
+          echo "::add-mask::$ID_TOKEN"
+          echo "ID_TOKEN=$ID_TOKEN" >> "$GITHUB_ENV"
+          echo "minted ID token: ${#ID_TOKEN} chars, aud=$OIDC_AUDIENCE"
+
+      - name: Exchange at NTS stg (positive)
+        id: exchange
+        run: |
+          set -eu
+          resp=$(curl -sS -D "$RUNNER_TEMP/exchange.headers" -w '\n%{http_code}' \
+            -X POST "$EXCHANGE_URL/oauth/token" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode "subject_token=$ID_TOKEN" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            --data-urlencode "ngc_oidc_connection_id=$NGC_ORG/$NGC_CONNECTION_ID" \
+            --data-urlencode "audience=$EXCHANGE_AUDIENCE")
+          code=$(printf '%s' "$resp" | tail -n1)
+          body=$(printf '%s' "$resp" | sed '$d')
+          echo "exchange -> HTTP $code"
+          printf '%s' "$body" | jq 'if .access_token then .access_token="<masked>" else . end'
+          grep -iE 'cache-control|pragma' "$RUNNER_TEMP/exchange.headers" || true
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "200" ]; then
+            TOK=$(printf '%s' "$body" | jq -er .access_token)
+            echo "::add-mask::$TOK"
+            echo "EXCHANGED=$TOK" >> "$GITHUB_ENV"
+            printf '%s' "$body" | jq -r '"expires_in=\(.expires_in) token_type=\(.token_type) issued_token_type=\(.issued_token_type)"'
+            ttl=$(printf '%s' "$body" | jq -r .expires_in)
+            if [ "$ttl" -ge 595 ] && [ "$ttl" -le 600 ]; then
+              echo "expires_in within [ttl-5, ttl]: OK"
+            else
+              echo "::error::expires_in=$ttl outside [595,600]"
+            fi
+          fi
+
+      - name: Decode + verify the exchanged JWT
+        if: steps.exchange.outputs.code == '200'
+        run: |
+          set -eu
+          python3 .github/scripts/lab10_verify_jwt.py "$EXCHANGED" "$EXCHANGE_URL/.well-known/jwks.json" | tee "$RUNNER_TEMP/jwt.json"
+          grep -q '"signature": "verified"' "$RUNNER_TEMP/jwt.json" \
+            || { echo "::error::exchanged JWT signature did NOT verify against the served JWKS"; exit 1; }
+          iss=$(jq -r .iss "$RUNNER_TEMP/jwt.json")
+          [ "$iss" = "$EXCHANGE_URL" ] || echo "::warning::iss=$iss != $EXCHANGE_URL"
+
+      - name: Negative matrix
+        run: |
+          set -eu
+          probe() {
+            label="$1"; shift
+            resp=$(curl -sS -w '\n%{http_code}' -X POST "$EXCHANGE_URL/oauth/token" \
+              -H 'Content-Type: application/x-www-form-urlencoded' "$@") || resp=$'\nERR'
+            code=$(printf '%s' "$resp" | tail -n1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            echo "$label -> HTTP $code $(printf '%s' "$body" | head -c 200)"
+            err=$(printf '%s' "$body" | tr '|`\n' '/--' | head -c 120)
+            echo "| $label | $code | $err |" >> "$RUNNER_TEMP/negatives.md"
+          }
+          : > "$RUNNER_TEMP/negatives.md"
+          probe 'grant_type=client_credentials' \
+            --data-urlencode 'grant_type=client_credentials' \
+            --data-urlencode "subject_token=$ID_TOKEN" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            --data-urlencode "ngc_oidc_connection_id=$NGC_ORG/$NGC_CONNECTION_ID" \
+            --data-urlencode "audience=$EXCHANGE_AUDIENCE"
+          probe 'audience=Private-Registry (case)' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode "subject_token=$ID_TOKEN" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            --data-urlencode "ngc_oidc_connection_id=$NGC_ORG/$NGC_CONNECTION_ID" \
+            --data-urlencode 'audience=Private-Registry'
+          probe 'unknown connection' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode "subject_token=$ID_TOKEN" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            --data-urlencode "ngc_oidc_connection_id=$NGC_ORG/00000000-0000-0000-0000-000000000000" \
+            --data-urlencode "audience=$EXCHANGE_AUDIENCE"
+          TAMPERED=$(printf '%s' "$ID_TOKEN" | awk -F. '{mid=substr($2,20,1); repl=(mid=="A"?"B":"A"); print $1"."substr($2,1,19) repl substr($2,21)"."$3}')
+          probe 'tampered subject token' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode "subject_token=$TAMPERED" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            --data-urlencode "ngc_oidc_connection_id=$NGC_ORG/$NGC_CONNECTION_ID" \
+            --data-urlencode "audience=$EXCHANGE_AUDIENCE"
+          probe 'missing audience' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode "subject_token=$ID_TOKEN" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            --data-urlencode "ngc_oidc_connection_id=$NGC_ORG/$NGC_CONNECTION_ID"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$EXCHANGE_URL/oauth/token")
+          echo "GET /oauth/token -> HTTP $code"
+          echo "| GET /oauth/token (POST-only route) | $code | - |" >> "$RUNNER_TEMP/negatives.md"
+
+      - name: Redeem — docker login + pull (authorized)
+        id: redeem_allow
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          if printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin 2> "$RUNNER_TEMP/login.log"; then
+            echo "login=outcome-ok" >> "$GITHUB_OUTPUT"
+            if DOCKER_CONFIG="$tmpcfg" docker pull "$REGISTRY/$ALLOW_IMAGE" 2> "$RUNNER_TEMP/pull.log"; then
+              echo "pull=outcome-ok" >> "$GITHUB_OUTPUT"
+            else
+              echo "pull=outcome-denied" >> "$GITHUB_OUTPUT"
+              tail -2 "$RUNNER_TEMP/pull.log"
+            fi
+          else
+            echo "login=outcome-denied" >> "$GITHUB_OUTPUT"
+            echo "docker login with the exchanged token was denied:"; tail -2 "$RUNNER_TEMP/login.log"
+          fi
+
+      - name: Redeem — pull outside authorization
+        id: redeem_deny
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin >/dev/null 2>&1 || true
+          if DOCKER_CONFIG="$tmpcfg" docker pull "$REGISTRY/$DENY_IMAGE" 2> "$RUNNER_TEMP/pull2.log"; then
+            echo "pull=outcome-ok" >> "$GITHUB_OUTPUT"
+            echo "::error::pull outside authorization SUCCEEDED — policy scope is not enforced"
+          else
+            echo "pull=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -2 "$RUNNER_TEMP/pull2.log"
+          fi
+
+      - name: Redeem — push (download-only scope)
+        id: redeem_push
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin >/dev/null 2>&1 || true
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$REGISTRY/nvidia/rsalagame:lab10-push-probe"
+          if DOCKER_CONFIG="$tmpcfg" docker push "$REGISTRY/nvidia/rsalagame:lab10-push-probe" 2> "$RUNNER_TEMP/push.log"; then
+            echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
+            echo "::error::push with download-only scope SUCCEEDED — scope is not enforced"
+          else
+            echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -2 "$RUNNER_TEMP/push.log"
+          fi
+
+      - name: Control — docker login with the raw GitHub OIDC token
+        id: control_raw
+        if: always()
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          if printf '%s' "$ID_TOKEN" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin 2> "$RUNNER_TEMP/ctrl.log"; then
+            echo "login=outcome-ok" >> "$GITHUB_OUTPUT"
+            echo "::error::raw GitHub OIDC token accepted by the registry — unexpected"
+          else
+            echo "login=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -1 "$RUNNER_TEMP/ctrl.log"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Lab 10 — NTS stg token exchange (RFC 8693)"
+            echo ""
+            echo "Exchange endpoint: \`$EXCHANGE_URL/oauth/token\` · connection: \`$NGC_ORG/$NGC_CONNECTION_ID\` · subject aud: \`$OIDC_AUDIENCE\` · audience: \`$EXCHANGE_AUDIENCE\`"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Exchange (positive) | HTTP ${{ steps.exchange.outputs.code || 'n/a' }} |"
+            if [ -f "$RUNNER_TEMP/jwt.json" ]; then
+              echo "| Exchanged JWT signature vs served JWKS | $(jq -r .signature "$RUNNER_TEMP/jwt.json") |"
+              echo "| Exchanged JWT iss / aud / sub | \`$(jq -r .iss "$RUNNER_TEMP/jwt.json")\` / \`$(jq -r '.aud | if type == \"array\" then join(\",\") else . end' "$RUNNER_TEMP/jwt.json")\` / \`$(jq -r .sub "$RUNNER_TEMP/jwt.json")\` |"
+              echo "| Exchanged JWT assertion.* | \`$(jq -c '.assertion // {}' "$RUNNER_TEMP/jwt.json")\` |"
+            fi
+            echo ""
+            echo "### Negative matrix"
+            echo ""
+            echo "| Probe | HTTP | error |"
+            echo "| --- | --- | --- |"
+            cat "$RUNNER_TEMP/negatives.md" 2>/dev/null || true
+            echo ""
+            echo "### Redemption (registry: \`$REGISTRY\`)"
+            echo ""
+            echo "| Probe | Result |"
+            echo "| --- | --- |"
+            echo "| docker login (exchanged token) | ${{ steps.redeem_allow.outputs.login || 'skipped (no exchanged token)' }} |"
+            echo "| pull $ALLOW_IMAGE (authorized) | ${{ steps.redeem_allow.outputs.pull || 'skipped' }} |"
+            echo "| pull $DENY_IMAGE (outside policy) | ${{ steps.redeem_deny.outputs.pull || 'skipped' }} |"
+            echo "| push $ALLOW_IMAGE (download-only scope) | ${{ steps.redeem_push.outputs.push || 'skipped' }} |"
+            echo "| docker login (raw GitHub OIDC token, control) | ${{ steps.control_raw.outputs.login || 'n/a' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
