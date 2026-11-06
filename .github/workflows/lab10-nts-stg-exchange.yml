@@ -247,8 +247,11 @@ jobs:
             echo "| --- | --- |"
             echo "| Exchange (positive) | HTTP ${{ steps.exchange.outputs.code || 'n/a' }} |"
             if [ -f "$RUNNER_TEMP/jwt.json" ]; then
+              iss=$(jq -r .iss "$RUNNER_TEMP/jwt.json")
+              aud=$(jq -r '.aud | if type == "array" then join(",") else . end' "$RUNNER_TEMP/jwt.json")
+              sub=$(jq -r .sub "$RUNNER_TEMP/jwt.json")
               echo "| Exchanged JWT signature vs served JWKS | $(jq -r .signature "$RUNNER_TEMP/jwt.json") |"
-              echo "| Exchanged JWT iss / aud / sub | \`$(jq -r .iss "$RUNNER_TEMP/jwt.json")\` / \`$(jq -r '.aud | if type == \"array\" then join(\",\") else . end' "$RUNNER_TEMP/jwt.json")\` / \`$(jq -r .sub "$RUNNER_TEMP/jwt.json")\` |"
+              echo "| Exchanged JWT iss / aud / sub | \`$iss\` / \`$aud\` / \`$sub\` |"
               echo "| Exchanged JWT assertion.* | \`$(jq -c '.assertion // {}' "$RUNNER_TEMP/jwt.json")\` |"
             fi
             echo ""
