@@ -248,7 +248,10 @@ jobs:
           else
             echo "verify=outcome-denied" >> "$GITHUB_OUTPUT"
           fi
-          cat "$RUNNER_TEMP/cverify.log"
+          # trimmed: the Sigstore bundle's base64 is huge — show the facts only
+          trimmed=$(jq -c '.[] | {critical, optional: (.optional | del(.Bundle, .RekorBundle, .SigstoreBundle))}' \
+            "$RUNNER_TEMP/cverify.log" 2>/dev/null || true)
+          if [ -n "$trimmed" ]; then printf '%.800s\n' "$trimmed"; else head -c 400 "$RUNNER_TEMP/cverify.log"; fi
           if cosign verify-attestation --type cyclonedx "$REGISTRY/$COSIGN_IMAGE" \
               --certificate-identity-regexp "$ident" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -257,7 +260,9 @@ jobs:
           else
             echo "verify_att=outcome-denied" >> "$GITHUB_OUTPUT"
           fi
-          cat "$RUNNER_TEMP/cverify2.log"
+          trimmed=$(jq -c '.[] | {critical, optional: (.optional | del(.Bundle, .RekorBundle, .SigstoreBundle))}' \
+            "$RUNNER_TEMP/cverify2.log" 2>/dev/null || true)
+          if [ -n "$trimmed" ]; then printf '%.800s\n' "$trimmed"; else head -c 400 "$RUNNER_TEMP/cverify2.log"; fi
 
       - name: You can — oras discover the referrers
         id: oras_discover
