@@ -315,7 +315,7 @@ jobs:
           # the referrers endpoint needs a registry token (the 401 dance) — the
           # exchanged NTS token is the *credential* for it, not the bearer itself
           repo="${COSIGN_IMAGE%:*}"
-          dance=$(curl -s -D "$RUNNER_TEMP/dance.h" -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" \
+          dance=$(curl -sL -D "$RUNNER_TEMP/dance.h" -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" \
             --data-urlencode "service=registry" --data-urlencode "scope=repository:$repo:pull" -G \
             "$REGISTRY/token")
           rtok=$(printf '%s' "$dance" | jq -r '.token // empty' 2>/dev/null || true)
