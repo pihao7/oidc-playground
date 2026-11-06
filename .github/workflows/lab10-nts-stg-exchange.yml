@@ -43,9 +43,9 @@ on:
         required: true
         default: 'ghcr.io/nvidia/aicr:v1.2.0'
       cp_dest:
-        description: 'oras cp destination (team-scoped repo, push granted)'
+        description: 'oras cp destination (fresh org-level repo, push granted)'
         required: true
-        default: 'nvidia/aabb/aicr:v1.2.0'
+        default: 'nvidia/pihao-lab10-tree:v1.2.0'
 
 permissions:
   id-token: write
@@ -384,6 +384,32 @@ jobs:
           fi
           cat "$RUNNER_TEMP/ctree.log"
 
+      - name: You can — cosign sign the copied image (creates a cosign-shaped artifact)
+        id: cosign_sign_cp
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if cosign sign --yes "$REGISTRY/$CP_DEST" > "$RUNNER_TEMP/csigncp.log" 2>&1; then
+            echo "sign_cp=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign_cp=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/csigncp.log"
+
+      - name: You can — cosign tree again (lights up once cosign-shaped artifacts exist)
+        id: cosign_tree2
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if cosign tree "$REGISTRY/$CP_DEST" > "$RUNNER_TEMP/ctree2.log" 2>&1; then
+            echo "tree2=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "tree2=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/ctree2.log"
+
       - name: You cannot — pull outside the policy (the fence)
         id: redeem_deny
         if: steps.exchange.outputs.code == '200'
@@ -515,7 +541,9 @@ jobs:
             echo "| Helm chart (OCI artifact): oras push / cosign sign / verify | ${{ steps.cosign_chart.outputs.chart_push || 'skipped' }} / ${{ steps.cosign_chart.outputs.chart_sign || 'skipped' }} / ${{ steps.cosign_chart.outputs.chart_verify || 'skipped' }} |"
             echo "| oras cp -r $CP_SOURCE → $CP_DEST | ${{ steps.oras_cp.outputs.cp || 'skipped' }} |"
             echo "| oras discover the copied image | ${{ steps.oras_discover_cp.outputs.discover || 'skipped' }} |"
-            echo "| cosign tree | ${{ steps.cosign_tree.outputs.tree || 'skipped' }} |"
+            echo "| cosign tree (referrers-only shape) | ${{ steps.cosign_tree.outputs.tree || 'skipped' }} |"
+            echo "| cosign sign the copied image | ${{ steps.cosign_sign_cp.outputs.sign_cp || 'skipped' }} |"
+            echo "| cosign tree again (after cosign sign) | ${{ steps.cosign_tree2.outputs.tree2 || 'skipped' }} |"
             echo "| OCI 1.1 native referrers (forced cosign mode) | sign ${{ steps.cosign_oci11.outputs.sign_oci11 || 'skipped' }} / attest ${{ steps.cosign_oci11.outputs.attest_oci11 || 'skipped' }} |"
             echo ""
             echo "### What you cannot do (the fences)"
