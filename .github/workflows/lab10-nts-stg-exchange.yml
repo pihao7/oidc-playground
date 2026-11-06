@@ -314,14 +314,17 @@ jobs:
           echo "subject digest: $subj"
           # the referrers endpoint needs a registry token (the 401 dance) — the
           # exchanged NTS token is the *credential* for it, not the bearer itself
-          dance=$(curl -s -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" \
-            "$REGISTRY/token?service=registry&scope=repository:${COSIGN_IMAGE%:*}:pull")
+          repo="${COSIGN_IMAGE%:*}"
+          dance=$(curl -s -D "$RUNNER_TEMP/dance.h" -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" \
+            --data-urlencode "service=registry" --data-urlencode "scope=repository:$repo:pull" -G \
+            "$REGISTRY/token")
           rtok=$(printf '%s' "$dance" | jq -r '.token // empty' 2>/dev/null || true)
           if [ -n "$rtok" ]; then
             echo "token dance OK: registry token ${#rtok} chars"
           else
-            echo "::warning::token dance returned no token — response head:"
+            echo "::warning::token dance returned no token — response head + headers:"
             printf '%s' "$dance" | head -c 200; echo
+            grep -iE 'HTTP/|location' "$RUNNER_TEMP/dance.h" | head -4
           fi
           if [ -n "$rtok" ]; then
             code=$(curl -sL -o "$RUNNER_TEMP/ref11.json" -w '%{http_code}' \
