@@ -236,6 +236,11 @@ jobs:
         continue-on-error: true
         run: |
           set -eu
+          echo "helper diag: token_len=${#NGC_OIDC_ACCESS_TOKEN}"
+          echo "docker config:"; cat "${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          printf 'https://%s' "$REGISTRY" | docker-credential-ngc get > "$RUNNER_TEMP/helper.json" 2> "$RUNNER_TEMP/helper.err" \
+            && jq -r '"helper served: username=\(.Username) secret_len=\(.Secret | length)"' "$RUNNER_TEMP/helper.json" \
+            || { echo "helper FAILED:"; cat "$RUNNER_TEMP/helper.err"; }
           docker pull -q alpine:3.20 >/dev/null
           docker tag alpine:3.20 "$REGISTRY/$COSIGN_IMAGE"
           # default docker config: credHelpers wired by init — the helper serves
