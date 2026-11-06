@@ -82,7 +82,7 @@ jobs:
           echo "ID_TOKEN=$ID_TOKEN" >> "$GITHUB_ENV"
           echo "minted ID token: ${#ID_TOKEN} chars, aud=$OIDC_AUDIENCE"
           printf '%s' "$ID_TOKEN" | cut -d. -f2 | tr '_-' '/+' | awk '{l=length($0)%4; printf "%s%*s", $0, (l?4-l:0), ""}' | base64 -d 2>/dev/null \
-            | jq '{sub, aud, repository, ref, run_id, actor}' || echo "(payload decode failed)"
+            | jq '{sub, aud, repository, ref, workflow_ref, run_id, actor}' || echo "(payload decode failed)"
 
       - name: Exchange at NTS stg (positive)
         id: exchange
@@ -176,6 +176,24 @@ jobs:
           fi
           tail -4 "$RUNNER_TEMP/cpush.log"
 
+      - name: You can — cosign attest SLSA provenance (second predicate type)
+        id: cosign_attest_slsa
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/provenance.json" <<'JSON'
+          {"builder":{"id":"https://github.com/actions/runner"},"buildType":"lab10",
+           "invocation":{},"buildConfig":{},"metadata":{},"materials":[]}
+          JSON
+          if cosign attest --yes --type slsaprovenance --predicate "$RUNNER_TEMP/provenance.json" \
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattestslsa.log" 2>&1; then
+            echo "attest_slsa=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "attest_slsa=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/cattestslsa.log"
+
       - name: You can — cosign keyless sign (no signing key)
         id: cosign_sign
         if: steps.exchange.outputs.code == '200'
@@ -263,6 +281,42 @@ jobs:
           trimmed=$(jq -c '.[] | {critical, optional: (.optional | del(.Bundle, .RekorBundle, .SigstoreBundle))}' \
             "$RUNNER_TEMP/cverify2.log" 2>/dev/null || true)
           if [ -n "$trimmed" ]; then printf '%.800s\n' "$trimmed"; else head -c 400 "$RUNNER_TEMP/cverify2.log"; fi
+
+      - name: You can — cosign sign a Helm chart (OCI artifact — "identical flow")
+        id: cosign_chart
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          ident="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          ident="${ident%%@*}@*"
+          CHART_REF="$REGISTRY/${COSIGN_IMAGE%:*}:chart"
+          mkdir -p "$RUNNER_TEMP/demo-chart/templates"
+          printf 'apiVersion: v2\nname: demo-chart\nversion: 0.1.0\n' > "$RUNNER_TEMP/demo-chart/Chart.yaml"
+          printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: lab10\n' > "$RUNNER_TEMP/demo-chart/templates/cm.yaml"
+          tar -czf "$RUNNER_TEMP/demo-chart-0.1.0.tgz" -C "$RUNNER_TEMP" demo-chart
+          if oras push "$CHART_REF" --artifact-type application/vnd.cncf.helm.chart.v1.tar+gzip \
+              "$RUNNER_TEMP/demo-chart-0.1.0.tgz:application/gzip" > "$RUNNER_TEMP/oraspush.log" 2>&1; then
+            echo "chart_push=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart_push=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/oraspush.log"
+          if cosign sign --yes "$CHART_REF" > "$RUNNER_TEMP/csignchart.log" 2>&1; then
+            echo "chart_sign=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart_sign=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/csignchart.log"
+          if cosign verify "$CHART_REF" \
+              --certificate-identity-regexp "$ident" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              > "$RUNNER_TEMP/cverifychart.log" 2>&1; then
+            echo "chart_verify=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart_verify=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/cverifychart.log"
 
       - name: You can — oras discover the referrers
         id: oras_discover
@@ -402,8 +456,10 @@ jobs:
             echo "| docker push $COSIGN_IMAGE (granted repo, no docker login — credential helper) | ${{ steps.cosign_push.outputs.push || 'skipped' }} |"
             echo "| cosign keyless sign (no signing key — Fulcio + Rekor) | ${{ steps.cosign_sign.outputs.sign || 'skipped' }} |"
             echo "| cosign attest an SBOM (DSSE) | ${{ steps.cosign_attest.outputs.attest || 'skipped' }} |"
+            echo "| cosign attest SLSA provenance | ${{ steps.cosign_attest_slsa.outputs.attest_slsa || 'skipped' }} |"
             echo "| cosign verify + verify-attestation (keyless) | ${{ steps.cosign_verify.outputs.verify || 'skipped' }} / ${{ steps.cosign_verify.outputs.verify_att || 'skipped' }} |"
             echo "| oras discover the referrers | ${{ steps.oras_discover.outputs.discover || 'skipped' }} |"
+            echo "| Helm chart (OCI artifact): oras push / cosign sign / verify | ${{ steps.cosign_chart.outputs.chart_push || 'skipped' }} / ${{ steps.cosign_chart.outputs.chart_sign || 'skipped' }} / ${{ steps.cosign_chart.outputs.chart_verify || 'skipped' }} |"
             echo "| OCI 1.1 native referrers (forced cosign mode) | sign ${{ steps.cosign_oci11.outputs.sign_oci11 || 'skipped' }} / attest ${{ steps.cosign_oci11.outputs.attest_oci11 || 'skipped' }} |"
             echo ""
             echo "### What you cannot do (the fences)"
