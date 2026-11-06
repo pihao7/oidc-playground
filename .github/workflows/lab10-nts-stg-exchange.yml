@@ -316,7 +316,8 @@ jobs:
           # exchanged NTS token is the *credential* for it, not the bearer itself
           repo="${COSIGN_IMAGE%:*}"
           dance=$(curl -sL -D "$RUNNER_TEMP/dance.h" -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" \
-            --data-urlencode "service=registry" --data-urlencode "scope=repository:$repo:pull" -G \
+            --data-urlencode "service=registry" --data-urlencode "scope=repository:$repo:pull" \
+            --data-urlencode "account=\$oauthtoken" --data-urlencode "client_id=docker" -G \
             "$REGISTRY/token")
           rtok=$(printf '%s' "$dance" | jq -r '.token // empty' 2>/dev/null || true)
           if [ -n "$rtok" ]; then
