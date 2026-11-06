@@ -295,12 +295,16 @@ jobs:
           printf 'apiVersion: v2\nname: demo-chart\nversion: 0.1.0\n' > "$RUNNER_TEMP/demo-chart/Chart.yaml"
           printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: lab10\n' > "$RUNNER_TEMP/demo-chart/templates/cm.yaml"
           tar -czf "$RUNNER_TEMP/demo-chart-0.1.0.tgz" -C "$RUNNER_TEMP" demo-chart
-          if oras push "$CHART_REF" --artifact-type application/vnd.cncf.helm.chart.v1.tar+gzip \
-              "$RUNNER_TEMP/demo-chart-0.1.0.tgz:application/gzip" > "$RUNNER_TEMP/oraspush.log" 2>&1; then
-            echo "chart_push=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "chart_push=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
+          # relative filename: oras rejects absolute paths in annotations
+          (
+            cd "$RUNNER_TEMP"
+            if oras push "$CHART_REF" --artifact-type application/vnd.cncf.helm.chart.v1.tar+gzip \
+                "demo-chart-0.1.0.tgz:application/gzip" > "$RUNNER_TEMP/oraspush.log" 2>&1; then
+              echo "chart_push=outcome-ok" >> "$GITHUB_OUTPUT"
+            else
+              echo "chart_push=outcome-denied" >> "$GITHUB_OUTPUT"
+            fi
+          )
           cat "$RUNNER_TEMP/oraspush.log"
           if cosign sign --yes "$CHART_REF" > "$RUNNER_TEMP/csignchart.log" 2>&1; then
             echo "chart_sign=outcome-ok" >> "$GITHUB_OUTPUT"
