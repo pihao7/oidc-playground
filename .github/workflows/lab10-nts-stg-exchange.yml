@@ -312,8 +312,12 @@ jobs:
           sleep 2
           subj=$(docker manifest inspect -v "$REGISTRY/$COSIGN_IMAGE" | jq -r '.Descriptor.digest')
           echo "subject digest: $subj"
+          # the referrers endpoint needs a registry token (the 401 dance) — the
+          # exchanged NTS token is the *credential* for it, not the bearer itself
+          rtok=$(curl -s -u "\$oauthtoken:$NGC_OIDC_ACCESS_TOKEN" \
+            "$REGISTRY/token?service=registry&scope=repository:${COSIGN_IMAGE%:*}:pull" | jq -er .token)
           code=$(curl -sL -o "$RUNNER_TEMP/ref11.json" -w '%{http_code}' \
-            -H "Authorization: Bearer $NGC_OIDC_ACCESS_TOKEN" \
+            -H "Authorization: Bearer $rtok" \
             -H 'Accept: application/vnd.oci.image.index.v1+json' \
             "$REGISTRY/v2/${COSIGN_IMAGE%:*}/referrers/$subj")
           echo "referrers-after-oci11-push -> HTTP $code"
