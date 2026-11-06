@@ -294,6 +294,7 @@ jobs:
         continue-on-error: true
         run: |
           set -eu
+          export COSIGN_EXPERIMENTAL=1
           ok=0
           if cosign sign --yes --registry-referrers-mode oci-1-1 \
               "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/csign11.log"; then
@@ -302,7 +303,7 @@ jobs:
             echo "sign_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
             tail -3 "$RUNNER_TEMP/csign11.log"
           fi
-          if cosign attest --yes --registry-referrers-mode oci-1-1 --type cyclonedx \
+          if cosign attest --yes --type cyclonedx \
               --predicate "$RUNNER_TEMP/sbom.cdx.json" \
               "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/cattest11.log"; then
             echo "attest_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
@@ -313,7 +314,7 @@ jobs:
           sleep 2
           subj=$(docker manifest inspect -v "$REGISTRY/$COSIGN_IMAGE" | jq -r '.Descriptor.digest')
           echo "subject digest: $subj"
-          code=$(curl -s -o "$RUNNER_TEMP/ref11.json" -w '%{http_code}' \
+          code=$(curl -sL -o "$RUNNER_TEMP/ref11.json" -w '%{http_code}' \
             -H "Authorization: Bearer $NGC_OIDC_ACCESS_TOKEN" \
             -H 'Accept: application/vnd.oci.image.index.v1+json' \
             "$REGISTRY/v2/${COSIGN_IMAGE%:*}/referrers/$subj")
