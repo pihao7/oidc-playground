@@ -105,6 +105,9 @@ jobs:
           if [ "$code" = "200" ]; then
             TOK=$(printf '%s' "$body" | jq -er .access_token)
             echo "::add-mask::$TOK"
+            # NGC_OIDC_ACCESS_TOKEN is the credential helper's input name — the
+            # cosign/oras phase (and any docker op using credHelpers) depends on it
+            echo "NGC_OIDC_ACCESS_TOKEN=$TOK" >> "$GITHUB_ENV"
             echo "EXCHANGED=$TOK" >> "$GITHUB_ENV"
             printf '%s' "$body" | jq -r '"expires_in=\(.expires_in) token_type=\(.token_type) issued_token_type=\(.issued_token_type)"'
             ttl=$(printf '%s' "$body" | jq -r .expires_in)
