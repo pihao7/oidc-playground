@@ -322,6 +322,9 @@ jobs:
           rtok=$(printf '%s' "$dance" | jq -r '.token // empty' 2>/dev/null || true)
           if [ -n "$rtok" ]; then
             echo "token dance OK: registry token ${#rtok} chars"
+            # decode the registry token's access claims (not the token itself)
+            printf '%s' "$rtok" | cut -d. -f2 | tr '_-' '/+' | awk '{l=length($0)%4; printf "%s%*s", $0, (l?4-l:0), ""}' \
+              | base64 -d 2>/dev/null | jq -c '{access, aud}' || echo "(token payload decode failed)"
           else
             echo "::warning::token dance returned no token — response head + headers:"
             printf '%s' "$dance" | head -c 200; echo
