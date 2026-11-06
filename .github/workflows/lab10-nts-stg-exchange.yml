@@ -309,10 +309,8 @@ jobs:
             echo "attest_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
           fi
           cat "$RUNNER_TEMP/cattest11.log"
-          # the referrers index is verified by the `oras discover` step below —
-          # it does the registry-token dance natively (a raw curl here would
-          # need the same dance; the exchanged NTS token is the credential for
-          # it, not the bearer)
+          # the referrers index is verified by the `oras discover` step below,
+          # which authenticates natively
 
       - name: Cosign verify + verify-attestation
         id: cosign_verify
