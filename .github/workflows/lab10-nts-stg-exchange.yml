@@ -38,6 +38,14 @@ on:
         description: 'sandbox image for the cosign/oras probes (push-granted policy)'
         required: true
         default: 'nvidia/pihao-lab10-cosign:lab10'
+      cp_source:
+        description: 'oras cp source (public image with referrers)'
+        required: true
+        default: 'ghcr.io/nvidia/aicr:v1.2.0'
+      cp_dest:
+        description: 'oras cp destination (team-scoped repo, push granted)'
+        required: true
+        default: 'nvidia/aabb/aicr:v1.2.0'
 
 permissions:
   id-token: write
@@ -57,6 +65,8 @@ jobs:
       ALLOW_IMAGE: ${{ inputs.allow_image }}
       DENY_IMAGE: ${{ inputs.deny_image }}
       COSIGN_IMAGE: ${{ inputs.cosign_image }}
+      CP_SOURCE: ${{ inputs.cp_source }}
+      CP_DEST: ${{ inputs.cp_dest }}
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v3
@@ -335,6 +345,45 @@ jobs:
           fi
           cat "$RUNNER_TEMP/odisc.log"
 
+      - name: You can — oras cp -r (copy an image with its referrers from another registry)
+        id: oras_cp
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if oras cp -r "$CP_SOURCE" "$REGISTRY/$CP_DEST" > "$RUNNER_TEMP/ocp.log" 2>&1; then
+            echo "cp=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "cp=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/ocp.log"
+
+      - name: You can — oras discover the copied image
+        id: oras_discover_cp
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if oras discover "$REGISTRY/$CP_DEST" > "$RUNNER_TEMP/odisccp.log" 2>&1; then
+            echo "discover=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "discover=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/odisccp.log"
+
+      - name: You can — cosign tree (signatures and attestations of the copied image)
+        id: cosign_tree
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if cosign tree "$REGISTRY/$CP_DEST" > "$RUNNER_TEMP/ctree.log" 2>&1; then
+            echo "tree=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "tree=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/ctree.log"
+
       - name: You cannot — pull outside the policy (the fence)
         id: redeem_deny
         if: steps.exchange.outputs.code == '200'
@@ -464,6 +513,9 @@ jobs:
             echo "| cosign verify + verify-attestation (keyless) | ${{ steps.cosign_verify.outputs.verify || 'skipped' }} / ${{ steps.cosign_verify.outputs.verify_att || 'skipped' }} |"
             echo "| oras discover the referrers | ${{ steps.oras_discover.outputs.discover || 'skipped' }} |"
             echo "| Helm chart (OCI artifact): oras push / cosign sign / verify | ${{ steps.cosign_chart.outputs.chart_push || 'skipped' }} / ${{ steps.cosign_chart.outputs.chart_sign || 'skipped' }} / ${{ steps.cosign_chart.outputs.chart_verify || 'skipped' }} |"
+            echo "| oras cp -r $CP_SOURCE → $CP_DEST | ${{ steps.oras_cp.outputs.cp || 'skipped' }} |"
+            echo "| oras discover the copied image | ${{ steps.oras_discover_cp.outputs.discover || 'skipped' }} |"
+            echo "| cosign tree | ${{ steps.cosign_tree.outputs.tree || 'skipped' }} |"
             echo "| OCI 1.1 native referrers (forced cosign mode) | sign ${{ steps.cosign_oci11.outputs.sign_oci11 || 'skipped' }} / attest ${{ steps.cosign_oci11.outputs.attest_oci11 || 'skipped' }} |"
             echo ""
             echo "### What you cannot do (the fences)"
