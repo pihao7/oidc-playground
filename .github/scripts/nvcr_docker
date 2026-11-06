@@ -18,7 +18,7 @@
 # environment; in Actions the exchange also writes $GITHUB_ENV, so later steps
 # (and their ops) see it too. Nothing is stored.
 #
-# Inputs (environment): nvcr_oidc_init exchange's inputs (EXCHANGE_URL,
+# Inputs (environment): docker-credential-ngc exchange's inputs (EXCHANGE_URL,
 # NGC_ORG, NGC_CONNECTION_ID, ACTIONS_ID_TOKEN_REQUEST_*) plus
 # NGC_OIDC_ACCESS_TOKEN — the current credential; when unset (API-key fallback
 # mode) there is nothing to refresh and auth failures fail through.
@@ -53,7 +53,7 @@ refresh() {
     # machine-readable here, in or out of Actions; its $GITHUB_ENV write
     # (when in Actions) is untouched, so later steps see the new token too
     tmp_out=$(mktemp)
-    GITHUB_OUTPUT="$tmp_out" "$script_dir/nvcr_oidc_init" exchange
+    GITHUB_OUTPUT="$tmp_out" "$script_dir/docker-credential-ngc" exchange
     token=$(sed -n 's/^token=//p' "$tmp_out")
     rm -f "$tmp_out"
     if [ -z "$token" ]; then
