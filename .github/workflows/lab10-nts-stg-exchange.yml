@@ -249,12 +249,12 @@ jobs:
           docker tag alpine:3.20 "$REGISTRY/$COSIGN_IMAGE"
           # default docker config: credHelpers wired by init — the helper serves
           # the exchanged token; this exercises the helper path itself
-          if docker push "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/cpush.log"; then
+          if docker push "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cpush.log" 2>&1; then
             echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
           else
             echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -2 "$RUNNER_TEMP/cpush.log"
           fi
+          tail -4 "$RUNNER_TEMP/cpush.log"
 
       - name: Cosign keyless sign (Flow A — Fulcio + Rekor, push via the helper)
         id: cosign_sign
@@ -262,13 +262,12 @@ jobs:
         continue-on-error: true
         run: |
           set -eu
-          if cosign sign --yes "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/csign.log"; then
+          if cosign sign --yes "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/csign.log" 2>&1; then
             echo "sign=outcome-ok" >> "$GITHUB_OUTPUT"
-            grep -oE 'tlog entry [0-9]+' "$RUNNER_TEMP/csign.log" | tail -1 || true
           else
             echo "sign=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/csign.log"
           fi
+          cat "$RUNNER_TEMP/csign.log"
 
       - name: Cosign attest SBOM (DSSE envelope — the open validator question)
         id: cosign_attest
@@ -280,13 +279,12 @@ jobs:
           {"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{},"components":[]}
           JSON
           if cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" \
-              "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/cattest.log"; then
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattest.log" 2>&1; then
             echo "attest=outcome-ok" >> "$GITHUB_OUTPUT"
-            grep -oE 'tlog entry [0-9]+' "$RUNNER_TEMP/cattest.log" | tail -1 || true
           else
             echo "attest=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/cattest.log"
           fi
+          cat "$RUNNER_TEMP/cattest.log"
 
       - name: Cosign OCI 1.1 native referrers (forced mode — does the registry index a subject push?)
         id: cosign_oci11
@@ -297,20 +295,20 @@ jobs:
           export COSIGN_EXPERIMENTAL=1
           ok=0
           if cosign sign --yes --registry-referrers-mode oci-1-1 \
-              "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/csign11.log"; then
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/csign11.log" 2>&1; then
             echo "sign_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
           else
             echo "sign_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/csign11.log"
           fi
+          cat "$RUNNER_TEMP/csign11.log"
           if cosign attest --yes --type cyclonedx \
               --predicate "$RUNNER_TEMP/sbom.cdx.json" \
-              "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/cattest11.log"; then
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattest11.log" 2>&1; then
             echo "attest_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
           else
             echo "attest_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/cattest11.log"
           fi
+          cat "$RUNNER_TEMP/cattest11.log"
           sleep 2
           subj=$(docker manifest inspect -v "$REGISTRY/$COSIGN_IMAGE" | jq -r '.Descriptor.digest')
           echo "subject digest: $subj"
@@ -336,8 +334,8 @@ jobs:
             echo "verify=outcome-ok" >> "$GITHUB_OUTPUT"
           else
             echo "verify=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/cverify.log"
           fi
+          cat "$RUNNER_TEMP/cverify.log"
           if cosign verify-attestation --type cyclonedx "$REGISTRY/$COSIGN_IMAGE" \
               --certificate-identity-regexp "$ident" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -345,8 +343,8 @@ jobs:
             echo "verify_att=outcome-ok" >> "$GITHUB_OUTPUT"
           else
             echo "verify_att=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/cverify2.log"
           fi
+          cat "$RUNNER_TEMP/cverify2.log"
 
       - name: Oras discover (OCI 1.1 referrers)
         id: oras_discover
@@ -356,11 +354,10 @@ jobs:
           set -eu
           if oras discover --format tree "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/odisc.log" 2>&1; then
             echo "discover=outcome-ok" >> "$GITHUB_OUTPUT"
-            cat "$RUNNER_TEMP/odisc.log"
           else
             echo "discover=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -3 "$RUNNER_TEMP/odisc.log"
           fi
+          cat "$RUNNER_TEMP/odisc.log"
 
       - name: Control — docker login with the raw GitHub OIDC token
         id: control_raw
