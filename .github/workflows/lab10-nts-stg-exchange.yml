@@ -34,6 +34,10 @@ on:
         description: 'image outside the policy (pull should be denied)'
         required: true
         default: 'nvidia/node:0.1'
+      cosign_image:
+        description: 'sandbox image for the cosign/oras probes (push-granted policy)'
+        required: true
+        default: 'nvidia/pihao-lab10-cosign:lab10'
 
 permissions:
   id-token: write
@@ -52,8 +56,11 @@ jobs:
       REGISTRY: ${{ inputs.registry }}
       ALLOW_IMAGE: ${{ inputs.allow_image }}
       DENY_IMAGE: ${{ inputs.deny_image }}
+      COSIGN_IMAGE: ${{ inputs.cosign_image }}
     steps:
       - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - uses: oras-project/setup-oras@v2
 
       - name: Mint GitHub OIDC token
         run: |
@@ -220,6 +227,96 @@ jobs:
             tail -2 "$RUNNER_TEMP/push.log"
           fi
 
+      - name: Cosign sandbox — push a tiny image (via the credential helper)
+        id: cosign_push
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$REGISTRY/$COSIGN_IMAGE"
+          # default docker config: credHelpers wired by init — the helper serves
+          # the exchanged token; this exercises the helper path itself
+          if docker push "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/cpush.log"; then
+            echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -2 "$RUNNER_TEMP/cpush.log"
+          fi
+
+      - name: Cosign keyless sign (Flow A — Fulcio + Rekor, push via the helper)
+        id: cosign_sign
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if cosign sign --yes "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/csign.log"; then
+            echo "sign=outcome-ok" >> "$GITHUB_OUTPUT"
+            grep -oE 'tlog entry [0-9]+' "$RUNNER_TEMP/csign.log" | tail -1 || true
+          else
+            echo "sign=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -3 "$RUNNER_TEMP/csign.log"
+          fi
+
+      - name: Cosign attest SBOM (DSSE envelope — the open validator question)
+        id: cosign_attest
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/sbom.cdx.json" <<'JSON'
+          {"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{},"components":[]}
+          JSON
+          if cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" \
+              "$REGISTRY/$COSIGN_IMAGE" 2> "$RUNNER_TEMP/cattest.log"; then
+            echo "attest=outcome-ok" >> "$GITHUB_OUTPUT"
+            grep -oE 'tlog entry [0-9]+' "$RUNNER_TEMP/cattest.log" | tail -1 || true
+          else
+            echo "attest=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -3 "$RUNNER_TEMP/cattest.log"
+          fi
+
+      - name: Cosign verify + verify-attestation
+        id: cosign_verify
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          ident="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          ident="${ident%%@*}@*"
+          if cosign verify "$REGISTRY/$COSIGN_IMAGE" \
+              --certificate-identity-regexp "$ident" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              > "$RUNNER_TEMP/cverify.log" 2>&1; then
+            echo "verify=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -3 "$RUNNER_TEMP/cverify.log"
+          fi
+          if cosign verify-attestation --type cyclonedx "$REGISTRY/$COSIGN_IMAGE" \
+              --certificate-identity-regexp "$ident" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              > "$RUNNER_TEMP/cverify2.log" 2>&1; then
+            echo "verify_att=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify_att=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -3 "$RUNNER_TEMP/cverify2.log"
+          fi
+
+      - name: Oras discover (OCI 1.1 referrers)
+        id: oras_discover
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if oras discover --format tree "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/odisc.log" 2>&1; then
+            echo "discover=outcome-ok" >> "$GITHUB_OUTPUT"
+            cat "$RUNNER_TEMP/odisc.log"
+          else
+            echo "discover=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -3 "$RUNNER_TEMP/odisc.log"
+          fi
+
       - name: Control — docker login with the raw GitHub OIDC token
         id: control_raw
         if: always()
@@ -270,4 +367,15 @@ jobs:
             echo "| pull $DENY_IMAGE (outside policy) | ${{ steps.redeem_deny.outputs.pull || 'skipped' }} |"
             echo "| push $ALLOW_IMAGE (download-only scope) | ${{ steps.redeem_push.outputs.push || 'skipped' }} |"
             echo "| docker login (raw GitHub OIDC token, control) | ${{ steps.control_raw.outputs.login || 'n/a' }} |"
+            echo ""
+            echo "### Cosign / oras (sandbox: \`$COSIGN_IMAGE\` — push granted by the second policy)"
+            echo ""
+            echo "| Probe | Result |"
+            echo "| --- | --- |"
+            echo "| docker push tiny image (via credential helper) | ${{ steps.cosign_push.outputs.push || 'skipped' }} |"
+            echo "| cosign keyless sign (Fulcio + Rekor) | ${{ steps.cosign_sign.outputs.sign || 'skipped' }} |"
+            echo "| cosign attest cyclonedx (DSSE) | ${{ steps.cosign_attest.outputs.attest || 'skipped' }} |"
+            echo "| cosign verify | ${{ steps.cosign_verify.outputs.verify || 'skipped' }} |"
+            echo "| cosign verify-attestation | ${{ steps.cosign_verify.outputs.verify_att || 'skipped' }} |"
+            echo "| oras discover (referrers tree) | ${{ steps.oras_discover.outputs.discover || 'skipped' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
