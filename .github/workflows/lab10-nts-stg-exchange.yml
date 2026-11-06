@@ -132,7 +132,179 @@ jobs:
         if: steps.exchange.outputs.code == '200'
         run: .github/scripts/docker-credential-ngc setup
 
-      - name: Negative matrix
+      - name: You can — docker login + pull an authorized repository
+        id: redeem_allow
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          if printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin 2> "$RUNNER_TEMP/login.log"; then
+            echo "login=outcome-ok" >> "$GITHUB_OUTPUT"
+            if DOCKER_CONFIG="$tmpcfg" docker pull "$REGISTRY/$ALLOW_IMAGE" 2> "$RUNNER_TEMP/pull.log"; then
+              echo "pull=outcome-ok" >> "$GITHUB_OUTPUT"
+            else
+              echo "pull=outcome-denied" >> "$GITHUB_OUTPUT"
+              tail -2 "$RUNNER_TEMP/pull.log"
+            fi
+          else
+            echo "login=outcome-denied" >> "$GITHUB_OUTPUT"
+            echo "docker login with the exchanged token was denied:"; tail -2 "$RUNNER_TEMP/login.log"
+          fi
+
+      - name: You can — docker push a granted repository (no docker login, via the credential helper)
+        id: cosign_push
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          echo "helper diag: token_len=${#NGC_OIDC_ACCESS_TOKEN}"
+          echo "docker config:"; cat "${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          printf 'https://%s' "$REGISTRY" | docker-credential-ngc get > "$RUNNER_TEMP/helper.json" 2> "$RUNNER_TEMP/helper.err" \
+            && jq -r '"helper served: username=\(.Username) secret_len=\(.Secret | length)"' "$RUNNER_TEMP/helper.json" \
+            || { echo "helper FAILED:"; cat "$RUNNER_TEMP/helper.err"; }
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$REGISTRY/$COSIGN_IMAGE"
+          # default docker config: credHelpers wired by init — the helper serves
+          # the exchanged token; this exercises the helper path itself
+          if docker push "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cpush.log" 2>&1; then
+            echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          tail -4 "$RUNNER_TEMP/cpush.log"
+
+      - name: You can — cosign keyless sign (no signing key)
+        id: cosign_sign
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if cosign sign --yes "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/csign.log" 2>&1; then
+            echo "sign=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/csign.log"
+
+      - name: You can — cosign attest an SBOM (DSSE)
+        id: cosign_attest
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/sbom.cdx.json" <<'JSON'
+          {"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{},"components":[]}
+          JSON
+          if cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" \
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattest.log" 2>&1; then
+            echo "attest=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "attest=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/cattest.log"
+
+      - name: You can — OCI 1.1 native referrers (forced cosign mode)
+        id: cosign_oci11
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          export COSIGN_EXPERIMENTAL=1
+          ok=0
+          if cosign sign --yes --registry-referrers-mode oci-1-1 \
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/csign11.log" 2>&1; then
+            echo "sign_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
+          else
+            echo "sign_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/csign11.log"
+          if cosign attest --yes --type cyclonedx \
+              --predicate "$RUNNER_TEMP/sbom.cdx.json" \
+              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattest11.log" 2>&1; then
+            echo "attest_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
+          else
+            echo "attest_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/cattest11.log"
+          # the referrers index is verified by the `oras discover` step below,
+          # which authenticates natively
+
+      - name: You can — cosign verify (keyless verification)
+        id: cosign_verify
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          ident="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          ident="${ident%%@*}@*"
+          if cosign verify "$REGISTRY/$COSIGN_IMAGE" \
+              --certificate-identity-regexp "$ident" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              > "$RUNNER_TEMP/cverify.log" 2>&1; then
+            echo "verify=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/cverify.log"
+          if cosign verify-attestation --type cyclonedx "$REGISTRY/$COSIGN_IMAGE" \
+              --certificate-identity-regexp "$ident" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              > "$RUNNER_TEMP/cverify2.log" 2>&1; then
+            echo "verify_att=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify_att=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/cverify2.log"
+
+      - name: You can — oras discover the referrers
+        id: oras_discover
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          if oras discover --format tree "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/odisc.log" 2>&1; then
+            echo "discover=outcome-ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "discover=outcome-denied" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/odisc.log"
+
+      - name: You cannot — pull outside the policy (the fence)
+        id: redeem_deny
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin >/dev/null 2>&1 || true
+          if DOCKER_CONFIG="$tmpcfg" docker pull "$REGISTRY/$DENY_IMAGE" 2> "$RUNNER_TEMP/pull2.log"; then
+            echo "pull=outcome-ok" >> "$GITHUB_OUTPUT"
+            echo "::error::pull outside authorization SUCCEEDED — policy scope is not enforced"
+          else
+            echo "pull=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -2 "$RUNNER_TEMP/pull2.log"
+          fi
+
+      - name: You cannot — push with a download-only scope
+        id: redeem_push
+        if: steps.exchange.outputs.code == '200'
+        continue-on-error: true
+        run: |
+          set -eu
+          tmpcfg=$(mktemp -d)
+          printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin >/dev/null 2>&1 || true
+          docker pull -q alpine:3.20 >/dev/null
+          docker tag alpine:3.20 "$REGISTRY/nvidia/rsalagame:lab10-push-probe"
+          if DOCKER_CONFIG="$tmpcfg" docker push "$REGISTRY/nvidia/rsalagame:lab10-push-probe" 2> "$RUNNER_TEMP/push.log"; then
+            echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
+            echo "::error::push with download-only scope SUCCEEDED — scope is not enforced"
+          else
+            echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
+            tail -2 "$RUNNER_TEMP/push.log"
+          fi
+
+      - name: Security — the exchange's refusals (negative matrix)
         run: |
           set -eu
           probe() {
@@ -180,179 +352,7 @@ jobs:
           echo "GET /oauth/token -> HTTP $code"
           echo "| GET /oauth/token (POST-only route) | $code | - |" >> "$RUNNER_TEMP/negatives.md"
 
-      - name: Redeem — docker login + pull (authorized)
-        id: redeem_allow
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          tmpcfg=$(mktemp -d)
-          if printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin 2> "$RUNNER_TEMP/login.log"; then
-            echo "login=outcome-ok" >> "$GITHUB_OUTPUT"
-            if DOCKER_CONFIG="$tmpcfg" docker pull "$REGISTRY/$ALLOW_IMAGE" 2> "$RUNNER_TEMP/pull.log"; then
-              echo "pull=outcome-ok" >> "$GITHUB_OUTPUT"
-            else
-              echo "pull=outcome-denied" >> "$GITHUB_OUTPUT"
-              tail -2 "$RUNNER_TEMP/pull.log"
-            fi
-          else
-            echo "login=outcome-denied" >> "$GITHUB_OUTPUT"
-            echo "docker login with the exchanged token was denied:"; tail -2 "$RUNNER_TEMP/login.log"
-          fi
-
-      - name: Redeem — pull outside authorization
-        id: redeem_deny
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          tmpcfg=$(mktemp -d)
-          printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin >/dev/null 2>&1 || true
-          if DOCKER_CONFIG="$tmpcfg" docker pull "$REGISTRY/$DENY_IMAGE" 2> "$RUNNER_TEMP/pull2.log"; then
-            echo "pull=outcome-ok" >> "$GITHUB_OUTPUT"
-            echo "::error::pull outside authorization SUCCEEDED — policy scope is not enforced"
-          else
-            echo "pull=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -2 "$RUNNER_TEMP/pull2.log"
-          fi
-
-      - name: Redeem — push (download-only scope)
-        id: redeem_push
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          tmpcfg=$(mktemp -d)
-          printf '%s' "$EXCHANGED" | DOCKER_CONFIG="$tmpcfg" docker login "$REGISTRY" -u '$oauthtoken' --password-stdin >/dev/null 2>&1 || true
-          docker pull -q alpine:3.20 >/dev/null
-          docker tag alpine:3.20 "$REGISTRY/nvidia/rsalagame:lab10-push-probe"
-          if DOCKER_CONFIG="$tmpcfg" docker push "$REGISTRY/nvidia/rsalagame:lab10-push-probe" 2> "$RUNNER_TEMP/push.log"; then
-            echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
-            echo "::error::push with download-only scope SUCCEEDED — scope is not enforced"
-          else
-            echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
-            tail -2 "$RUNNER_TEMP/push.log"
-          fi
-
-      - name: Cosign sandbox — push a tiny image (via the credential helper)
-        id: cosign_push
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          echo "helper diag: token_len=${#NGC_OIDC_ACCESS_TOKEN}"
-          echo "docker config:"; cat "${DOCKER_CONFIG:-$HOME/.docker}/config.json"
-          printf 'https://%s' "$REGISTRY" | docker-credential-ngc get > "$RUNNER_TEMP/helper.json" 2> "$RUNNER_TEMP/helper.err" \
-            && jq -r '"helper served: username=\(.Username) secret_len=\(.Secret | length)"' "$RUNNER_TEMP/helper.json" \
-            || { echo "helper FAILED:"; cat "$RUNNER_TEMP/helper.err"; }
-          docker pull -q alpine:3.20 >/dev/null
-          docker tag alpine:3.20 "$REGISTRY/$COSIGN_IMAGE"
-          # default docker config: credHelpers wired by init — the helper serves
-          # the exchanged token; this exercises the helper path itself
-          if docker push "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cpush.log" 2>&1; then
-            echo "push=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "push=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          tail -4 "$RUNNER_TEMP/cpush.log"
-
-      - name: Cosign keyless sign (Flow A — Fulcio + Rekor, push via the helper)
-        id: cosign_sign
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          if cosign sign --yes "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/csign.log" 2>&1; then
-            echo "sign=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "sign=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/csign.log"
-
-      - name: Cosign attest SBOM (DSSE envelope — the open validator question)
-        id: cosign_attest
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          cat > "$RUNNER_TEMP/sbom.cdx.json" <<'JSON'
-          {"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{},"components":[]}
-          JSON
-          if cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" \
-              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattest.log" 2>&1; then
-            echo "attest=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "attest=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/cattest.log"
-
-      - name: Cosign OCI 1.1 native referrers (forced mode — does the registry index a subject push?)
-        id: cosign_oci11
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          export COSIGN_EXPERIMENTAL=1
-          ok=0
-          if cosign sign --yes --registry-referrers-mode oci-1-1 \
-              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/csign11.log" 2>&1; then
-            echo "sign_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
-          else
-            echo "sign_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/csign11.log"
-          if cosign attest --yes --type cyclonedx \
-              --predicate "$RUNNER_TEMP/sbom.cdx.json" \
-              "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/cattest11.log" 2>&1; then
-            echo "attest_oci11=outcome-ok" >> "$GITHUB_OUTPUT"; ok=1
-          else
-            echo "attest_oci11=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/cattest11.log"
-          # the referrers index is verified by the `oras discover` step below,
-          # which authenticates natively
-
-      - name: Cosign verify + verify-attestation
-        id: cosign_verify
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          ident="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
-          ident="${ident%%@*}@*"
-          if cosign verify "$REGISTRY/$COSIGN_IMAGE" \
-              --certificate-identity-regexp "$ident" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              > "$RUNNER_TEMP/cverify.log" 2>&1; then
-            echo "verify=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "verify=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/cverify.log"
-          if cosign verify-attestation --type cyclonedx "$REGISTRY/$COSIGN_IMAGE" \
-              --certificate-identity-regexp "$ident" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              > "$RUNNER_TEMP/cverify2.log" 2>&1; then
-            echo "verify_att=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "verify_att=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/cverify2.log"
-
-      - name: Oras discover (OCI 1.1 referrers)
-        id: oras_discover
-        if: steps.exchange.outputs.code == '200'
-        continue-on-error: true
-        run: |
-          set -eu
-          if oras discover --format tree "$REGISTRY/$COSIGN_IMAGE" > "$RUNNER_TEMP/odisc.log" 2>&1; then
-            echo "discover=outcome-ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "discover=outcome-denied" >> "$GITHUB_OUTPUT"
-          fi
-          cat "$RUNNER_TEMP/odisc.log"
-
-      - name: Control — docker login with the raw GitHub OIDC token
+      - name: Security — the raw GitHub token is not a registry credential
         id: control_raw
         if: always()
         continue-on-error: true
@@ -387,37 +387,30 @@ jobs:
               echo "| Exchanged JWT assertion.* | \`$(jq -c '.assertion // {}' "$RUNNER_TEMP/jwt.json")\` |"
             fi
             echo ""
-            echo "### Negative matrix"
+            echo "### What you can do with the exchanged credential (registry: \`$REGISTRY\`)"
             echo ""
-            echo "| Probe | HTTP | error |"
-            echo "| --- | --- | --- |"
-            cat "$RUNNER_TEMP/negatives.md" 2>/dev/null || true
+            echo "| Action | Result |"
+            echo "| --- | --- |"
+            echo "| docker login + pull $ALLOW_IMAGE (authorized) | ${{ steps.redeem_allow.outputs.pull || 'skipped (no exchanged token)' }} |"
+            echo "| docker push $COSIGN_IMAGE (granted repo, no docker login — credential helper) | ${{ steps.cosign_push.outputs.push || 'skipped' }} |"
+            echo "| cosign keyless sign (no signing key — Fulcio + Rekor) | ${{ steps.cosign_sign.outputs.sign || 'skipped' }} |"
+            echo "| cosign attest an SBOM (DSSE) | ${{ steps.cosign_attest.outputs.attest || 'skipped' }} |"
+            echo "| cosign verify + verify-attestation (keyless) | ${{ steps.cosign_verify.outputs.verify || 'skipped' }} / ${{ steps.cosign_verify.outputs.verify_att || 'skipped' }} |"
+            echo "| oras discover the referrers | ${{ steps.oras_discover.outputs.discover || 'skipped' }} |"
+            echo "| OCI 1.1 native referrers (forced cosign mode) | sign ${{ steps.cosign_oci11.outputs.sign_oci11 || 'skipped' }} / attest ${{ steps.cosign_oci11.outputs.attest_oci11 || 'skipped' }} |"
             echo ""
-            echo "### Redemption (registry: \`$REGISTRY\`)"
+            echo "### What you cannot do (the fences)"
             echo ""
             echo "| Probe | Result |"
             echo "| --- | --- |"
             echo "| docker login (exchanged token) | ${{ steps.redeem_allow.outputs.login || 'skipped (no exchanged token)' }} |"
-            echo "| pull $ALLOW_IMAGE (authorized) | ${{ steps.redeem_allow.outputs.pull || 'skipped' }} |"
             echo "| pull $DENY_IMAGE (outside policy) | ${{ steps.redeem_deny.outputs.pull || 'skipped' }} |"
             echo "| push $ALLOW_IMAGE (download-only scope) | ${{ steps.redeem_push.outputs.push || 'skipped' }} |"
-            echo "| docker login (raw GitHub OIDC token, control) | ${{ steps.control_raw.outputs.login || 'n/a' }} |"
+            echo "| docker login (raw GitHub OIDC token — not a registry credential) | ${{ steps.control_raw.outputs.login || 'n/a' }} |"
             echo ""
-            echo "### Cosign / oras (sandbox: \`$COSIGN_IMAGE\` — push granted by the second policy)"
+            echo "### The exchange's refusals (negative matrix)"
             echo ""
-            echo "| Probe | Result |"
-            echo "| --- | --- |"
-            echo "| docker push tiny image (via credential helper) | ${{ steps.cosign_push.outputs.push || 'skipped' }} |"
-            echo "| cosign keyless sign (Fulcio + Rekor) | ${{ steps.cosign_sign.outputs.sign || 'skipped' }} |"
-            echo "| cosign attest cyclonedx (DSSE) | ${{ steps.cosign_attest.outputs.attest || 'skipped' }} |"
-            echo "| cosign verify | ${{ steps.cosign_verify.outputs.verify || 'skipped' }} |"
-            echo "| cosign verify-attestation | ${{ steps.cosign_verify.outputs.verify_att || 'skipped' }} |"
-            echo "| oras discover (referrers tree) | ${{ steps.oras_discover.outputs.discover || 'skipped' }} |"
-            echo ""
-            echo "### OCI 1.1 native referrers (forced mode)"
-            echo ""
-            echo "| Probe | Result |"
-            echo "| --- | --- |"
-            echo "| cosign sign --registry-referrers-mode oci-1-1 | ${{ steps.cosign_oci11.outputs.sign_oci11 || 'skipped' }} |"
-            echo "| cosign attest --registry-referrers-mode oci-1-1 (DSSE) | ${{ steps.cosign_oci11.outputs.attest_oci11 || 'skipped' }} |"
+            echo "| Probe | HTTP | error |"
+            echo "| --- | --- | --- |"
+            cat "$RUNNER_TEMP/negatives.md" 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"
